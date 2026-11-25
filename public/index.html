@@ -51,11 +51,11 @@ code,.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}.A{color:var(
   <label>Header extra (JSON)</label><input id="c_extraHeaders" placeholder='{"X-Team":"abc"}'>
   <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="c_enabled" style="width:auto"> AI abilitata</label>
  </div>
- <div class="card"><b>Budget token</b> <span class="hint">quota MENSILE aziendale + limiti per analisi/chiamata</span><div id="quota" class="hint" style="margin:6px 0"></div>
+ <div class="card"><b>Budget token</b> <span class="hint">quota MENSILE aziendale + limiti per analisi/chiamata</span><div style="display:flex;gap:8px;align-items:center;margin:6px 0"><span id="quota" class="hint"></span><span class="hint">Usati nel mese:</span><input id="u_used" type="number" min="0" style="width:90px"><button class="s" id="u_set">Aggiorna</button><button class="s" id="u_reset">Azzera</button></div>
   <div class="row">
    <div><label>Quota mensile totale</label><input id="b_monthlyTokens" type="number"></div><div><label>Max per singola analisi</label><input id="b_perAnalysisTokens" type="number"></div><div><label>Max per chiamata</label><input id="b_maxContextTokens" type="number"></div><div><label>Output max</label><input id="b_maxOutputTokens" type="number"></div>
    <div><label>Chiamate max per analisi</label><input id="b_maxCalls" type="number"></div><div><label>Round di domande/batch</label><input id="b_maxRounds" type="number"></div>
-   <div><label>Token riservati ai documenti</label><input id="b_docTokens" type="number"></div>
+   <div><label>Token riservati ai documenti</label><input id="b_docTokens" type="number"></div><div><label>Commit max analizzati</label><input id="a_maxCommits" type="number"></div>
   </div>
   <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="b_cache" style="width:auto"> Cache risposte (zero token sui re-run identici)</label>
  </div>

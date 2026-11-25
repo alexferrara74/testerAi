@@ -15,7 +15,7 @@ npm test
 
 ## Budget token: 2000 al MESE
 Il limite è un **contatore mensile persistente** (`data/usage.json`, si azzera a inizio mese) mostrato in alto nel FE. Ogni chiamata viene dimensionata sul residuo e **non parte** se non ci sta; i token contati sono quelli reali del provider (stima se assenti).
-- Default: mese 2000 · per analisi 400 · per chiamata 600 · output 40 · max 3 chiamate · documenti 60 (tutto modificabile da FE).
+- Default: mese 2000 · per analisi 400 · per chiamata 600 · output 40 · max 3 chiamate · documenti 60 (tutto modificabile da FE, incluso il consumo del mese: aggiorna o azzera).
 - **La parte pesante è a 0 token**: regole statiche, simboli rimossi/cambiati, diff, checklist, report. L'AI è solo un filtro finale.
 - All'AI **non** vanno i casi certi (chiavi, conflitti, file `.env`): solo ambigui (SQL concat, XSS, exec…), regressioni e pochi hunk rischiosi, come `id|file:riga|codice` (≤90 caratteri).
 - Prompt di sistema ~40 token; risposta forzata a `{"b":[ids],"f":[ids],"a":[[file,da,a]]}` (solo id, niente motivazioni).

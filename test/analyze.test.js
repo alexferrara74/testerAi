@@ -34,6 +34,22 @@ test('analisi statica: modifiche, segreti, regressioni, checklist', async () => 
   assert.match(toMarkdown(r), /Checklist/);
 });
 
+test('analisi per commit: attribuzione, segreto poi rimosso resta in cronologia', async () => {
+  g('checkout', '-q', 'feature/x');
+  fs.writeFileSync(path.join(repo, 'cfg.js'), 'const token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB";\n');
+  g('add', '.'); g('commit', '-qm', 'add config with token');
+  fs.writeFileSync(path.join(repo, 'cfg.js'), 'const token = process.env.TOKEN;\n');
+  g('add', '.'); g('commit', '-qm', 'use env for token');
+  const r = await analyze({ repo, branch: 'feature/x', useAI: false });
+  const leak = r.commits.find((c) => c.subject === 'add config with token');
+  assert.ok(leak.analysis.findings.some((f) => f.rule === 'SEC-SECRET-TOKEN' && f.fixedLater));
+  assert.ok(r.findings.some((f) => f.rule === 'SEC-SECRET-HISTORY' && f.commit === leak.short));
+  const sql = r.findings.find((f) => f.rule === 'SEC-SQL-CONCAT');
+  assert.ok(sql.commit, 'problema attribuito al commit');
+  assert.equal(r.checklist.find((c) => c.id === 'c12').status, 'fail');
+  assert.equal(r.summary.commitsAnalyzed, r.summary.commits);
+});
+
 test('AI: quota mensile 2000 mai superata, cache e stop a quota esaurita', async () => {
   const seen = [];
   const srv = http.createServer((req, res) => {

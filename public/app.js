@@ -54,6 +54,8 @@ async function loadList() {
   $('list').innerHTML = l.length ? `<table>${l.map((r) => `<tr><td><a href="#" data-id="${r.id}">${esc(r.branch)} ← ${esc(r.base)}</a></td><td class="hint">${esc(r.repo)}</td><td class="hint">${new Date(r.createdAt).toLocaleString()}</td><td>${r.summary.findings} segnalazioni</td></tr>`).join('')}</table>` : '<p class="hint">Nessun report.</p>';
   $('list').querySelectorAll('a').forEach((a) => a.onclick = (e) => { e.preventDefault(); showReport(a.dataset.id); });
 }
+const riskTag = (a) => a.risk >= 8 ? `<span class="tag critical">rischio ${a.risk}</span>` : a.risk >= 4 ? `<span class="tag high">rischio ${a.risk}</span>` : a.risk >= 2 ? `<span class="tag medium">rischio ${a.risk}</span>` : '';
+const s_note = (r) => r.summary.commitsAnalyzed < r.summary.commits ? ` · analizzati ${r.summary.commitsAnalyzed}/${r.summary.commits}` : '';
 const ICON = { pass: '✅', warn: '⚠️', fail: '❌', manual: '👁️' };
 async function showReport(id) {
   const r = await api('/api/reports/' + id); const s = r.summary;
@@ -69,27 +71,33 @@ async function showReport(id) {
   <div class="card"><b>Modifiche rispetto a ${esc(r.base)}</b> <span class="hint">(${Object.entries(s.byStatus).map(([k, v]) => k + ':' + v).join(' ')})</span>
    ${r.files.map((f) => `<details><summary><span class="${f.status} mono">${f.status}</span> <code>${f.oldPath ? esc(f.oldPath) + ' → ' : ''}${esc(f.path)}</code> <span class="add">+${f.add}</span> <span class="del">-${f.del}</span></summary>
    <pre class="mono" style="margin:4px 0 8px;overflow:auto">${f.changes.map((l) => `<span class="${l.k === '+' ? 'add' : 'del'}">${l.k}${String(l.n).padStart(4)} ${esc(l.t)}</span>`).join('\n')}${f.truncated ? '\n…troncato' : ''}${f.binary ? 'binario' : ''}</pre></details>`).join('')}</div>
-  <div class="card"><b>Commit</b><table>${r.commits.map((c) => `<tr><td class="mono">${c.short}</td><td>${esc(c.subject)}${c.merge ? ' <span class="hint">(merge)</span>' : ''}</td><td class="hint">${esc(c.author)}</td><td class="hint">${c.files} file <span class="add">+${c.add}</span> <span class="del">-${c.del}</span></td></tr>`).join('')}</table></div>
+  <div class="card"><b>Commit</b> <span class="hint">analisi per commit a 0 token${s_note(r)}</span>${r.commits.map((c) => `<details><summary><span class="mono">${c.short}</span> ${esc(c.subject)}${c.merge ? ' <span class="hint">(merge)</span>' : ''} <span class="hint">${esc(c.author)} · ${c.files} file</span> <span class="add">+${c.add}</span> <span class="del">-${c.del}</span>${c.analysis ? ` ${riskTag(c.analysis)}` : ''}</summary>
+   ${c.analysis ? `<div style="margin:4px 0 8px 18px">${c.analysis.files.map((f) => `<div class="mono"><span class="${f.status}">${f.status}</span> ${esc(f.oldPath ? f.oldPath + ' → ' : '')}${esc(f.path)}</div>`).join('')}
+   ${c.analysis.findings.map((f) => `<div><span class="tag ${f.severity}">${f.severity}</span> <span class="mono">${esc(f.file)}${f.line ? ':' + f.line : ''}</span> ${esc(f.message)}${f.fixedLater ? ' <span class="hint">✔ corretto in un commit successivo</span>' : ''}</div>`).join('')}
+   ${c.analysis.noTests ? '<div class="hint">⚠ modifica sorgenti senza toccare test</div>' : ''}</div>` : '<div class="hint" style="margin-left:18px">non analizzato (oltre il limite)</div>'}</details>`).join('')}</div>
   ${Object.entries(cats).map(([k, t]) => { const fs = r.findings.filter((f) => f.category === k); return fs.length ? `<div class="card"><b>${t}</b> (${fs.length})<table>${fs.map((f) => `<tr><td><span class="tag ${f.severity}">${f.severity}</span></td><td class="mono">${esc(f.file)}${f.line ? ':' + f.line : ''}${f.commit ? ' @' + f.commit : ''}</td><td>${esc(f.message)}${f.code ? `<div class="mono hint">${esc(f.code)}</div>` : ''}${f.ai ? `<div class="hint">🤖 ${esc(f.ai)} ${esc(f.aiNote || '')}</div>` : ''}</td></tr>`).join('')}</table></div>` : ''; }).join('')}`;
   $('rep').querySelectorAll('input[data-c]').forEach((i) => i.onchange = () => post(`/api/reports/${id}/check`, { item: i.dataset.c, checked: i.checked }));
 }
 
 /* --- config --- */
 const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'timeoutMs'], BF = ['monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
-async function quota() { try { const u = await api('/api/usage'); const t = `Token AI ${u.month}: ${u.used}/${u.limit} (residui ${u.remaining})`; $('q').textContent = t; if ($('quota')) $('quota').textContent = t; } catch {} }
+async function quota() { try { const u = await api('/api/usage'); const t = `Token AI ${u.month}: ${u.used}/${u.limit} (residui ${u.remaining})`; $('q').textContent = t; if ($('quota')) { $('quota').textContent = t; $('u_used').value = u.used; } } catch {} }
 quota();
 async function loadCfg() {
   quota();
   const c = await api('/api/config');
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled;
-  BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;
+  BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('a_maxCommits').value = c.analysis.maxCommits; $('b_cache').checked = c.budget.cache;
 }
 $('save').onclick = async () => {
   try {
     const ai = { enabled: $('c_enabled').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value);
     ai.timeoutMs = +ai.timeoutMs || 60000;
     const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = +$('b_' + k).value);
-    await post('/api/config', { ai, budget }, 'PUT'); $('cmsg').textContent = '✔ salvato'; loadCfg();
+    await post('/api/config', { ai, budget, analysis: { maxCommits: +$('a_maxCommits').value } }, 'PUT'); $('cmsg').textContent = '✔ salvato (i valori incoerenti vengono riportati nei limiti: mese ≥ analisi ≥ chiamata)'; loadCfg();
   } catch (e) { $('cmsg').textContent = '❌ ' + e.message; }
 };
 $('test').onclick = async () => { $('cmsg').textContent = 'test…'; try { const r = await post('/api/config/test', {}); $('cmsg').textContent = '✔ ok ' + JSON.stringify(r.tokens); } catch (e) { $('cmsg').textContent = '❌ ' + e.message; } };
+
+$('u_set').onclick = async () => { await post('/api/usage', { used: +$('u_used').value }, 'PUT'); quota(); };
+$('u_reset').onclick = async () => { await post('/api/usage', { used: 0 }, 'PUT'); quota(); };

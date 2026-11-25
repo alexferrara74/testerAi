@@ -32,6 +32,7 @@ export const DEFAULTS = {
   },
   analysis: {
     maxFilesDetail: 300,
+    maxCommits: 100,
     maxHunkLinesPerFile: 150,
     ignorePaths: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'dist/', 'build/', 'node_modules/', '.min.'],
   },
@@ -58,6 +59,7 @@ export function saveConfig(patch) {
   const next = merge(cur, patch);
   next.ai.provider = ['openai', 'anthropic', 'ollama'].includes(next.ai.provider) ? next.ai.provider : 'openai';
   if (typeof next.ai.extraHeaders === 'string') { try { next.ai.extraHeaders = JSON.parse(next.ai.extraHeaders || '{}'); } catch { throw new Error('extraHeaders non e\' JSON valido'); } }
+  next.analysis.maxCommits = num(next.analysis.maxCommits, 1, 1000, 100);
   const b = next.budget;
   b.monthlyTokens = num(b.monthlyTokens, 100, 1e9, 2000);
   b.perAnalysisTokens = num(b.perAnalysisTokens, 50, b.monthlyTokens, 400);

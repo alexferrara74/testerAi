@@ -21,3 +21,13 @@ export function record(tokens, note) {
   fs.writeFileSync(FILE(), JSON.stringify(u));
   return u;
 }
+
+// Correzione manuale (es. allineare al consumo reale dal portale del provider, o azzerare).
+export function setUsed(tokens) {
+  const u = readUsage();
+  u.used = Math.max(0, Math.round(Number(tokens) || 0));
+  u.log = [...(u.log || []), { t: new Date().toISOString(), tokens: 0, note: `impostato manualmente a ${u.used}` }].slice(-50);
+  fs.mkdirSync(DATA, { recursive: true });
+  fs.writeFileSync(FILE(), JSON.stringify(u));
+  return u;
+}

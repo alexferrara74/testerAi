@@ -7,7 +7,7 @@ import { loadConfig, saveConfig, publicConfig, ROOT } from './config.js';
 import * as G from './git.js';
 import { analyze, listReports, getReport, setChecked, toMarkdown } from './analyzer.js';
 import { callModel } from './ai.js';
-import { readUsage } from './usage.js';
+import { readUsage, setUsed } from './usage.js';
 
 const PUB = path.join(ROOT, 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
@@ -47,7 +47,8 @@ export function createServer() {
         const d = target ? await G.detectBase(repo, target) : null;
         return send(res, 200, { ...b, suggestedBase: d?.base || null });
       }
-      if (req.method === 'GET' && u.pathname === '/api/usage') { const u2 = readUsage(), lim = loadConfig().budget.monthlyTokens; return send(res, 200, { month: u2.month, used: u2.used, limit: lim, remaining: Math.max(0, lim - u2.used), calls: u2.calls }); }
+      if (req.method === 'PUT' && u.pathname === '/api/usage') setUsed((await readBody(req)).used);
+      if ((req.method === 'GET' || req.method === 'PUT') && u.pathname === '/api/usage') { const u2 = readUsage(), lim = loadConfig().budget.monthlyTokens; return send(res, 200, { month: u2.month, used: u2.used, limit: lim, remaining: Math.max(0, lim - u2.used), calls: u2.calls }); }
       if (u.pathname === '/api/config') {
         if (req.method === 'GET') return send(res, 200, publicConfig());
         if (req.method === 'PUT') return send(res, 200, publicConfig(saveConfig(await readBody(req))));
