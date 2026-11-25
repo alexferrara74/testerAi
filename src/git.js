@@ -9,6 +9,8 @@ export async function git(cwd, args, { allowFail = false } = {}) {
   try {
     const { stdout } = await pexec('git', ['-c', 'core.quotepath=off', ...args], {
       cwd, maxBuffer: 128 * 1024 * 1024,
+      // Nessuna operazione di rete per git: protocolli remoti disabilitati, niente prompt/credential helper.
+      env: { ...process.env, GIT_ALLOW_PROTOCOL: 'file', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'true', GIT_OPTIONAL_LOCKS: '0' },
     });
     return stdout;
   } catch (e) {

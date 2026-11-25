@@ -14,7 +14,7 @@ npm test
 4. **Configurazione AI**: provider (OpenAI-compatibile = Copilot/Azure/gateway aziendale, Anthropic, Ollama), URL, modello, key, header auth/extra, api-version e budget token. Test connessione incluso. La key può essere passata via `TESTERAI_API_KEY`.
 
 ## Budget token: 2000 al MESE
-Il limite è un **contatore mensile persistente** (`data/usage.json`, si azzera a inizio mese) mostrato in alto nel FE. Ogni chiamata viene dimensionata sul residuo e **non parte** se non ci sta; i token contati sono quelli reali del provider (stima se assenti).
+Il limite è un **contatore mensile persistente** (`~/.testerai/usage.json`, si azzera a inizio mese) mostrato in alto nel FE. Ogni chiamata viene dimensionata sul residuo e **non parte** se non ci sta; i token contati sono quelli reali del provider (stima se assenti).
 - Default: mese 2000 · per analisi 400 · per chiamata 600 · output 40 · max 3 chiamate · documenti 60 (tutto modificabile da FE, incluso il consumo del mese: aggiorna o azzera).
 - **La parte pesante è a 0 token**: regole statiche, simboli rimossi/cambiati, diff, checklist, report. L'AI è solo un filtro finale.
 - All'AI **non** vanno i casi certi (chiavi, conflitti, file `.env`): solo ambigui (SQL concat, XSS, exec…), regressioni e pochi hunk rischiosi, come `id|file:riga|codice` (≤90 caratteri).
@@ -34,6 +34,16 @@ Per ogni voce scegli **«Sono consapevole»** oppure **«Da fixare»** (nel codi
 
 ## Verifica CVE delle dipendenze (0 token)
 Confronta manifest e lockfile tra base e branch (`package.json`+`package-lock.json`, `requirements.txt` con versioni `==`, `go.mod`) e interroga [OSV.dev](https://osv.dev) **solo per le dipendenze aggiunte o cambiate**. Per ogni CVE: gravità, versione che la corregge, voce in checklist e tabella nel report. Cache su disco (default 24h) per limitare le chiamate di rete. In azienda l'URL è modificabile da FE (mirror/proxy interno di OSV); se la rete non è raggiungibile l'analisi prosegue e la voce risulta "non verificata". Senza lockfile le versioni `^x.y` sono valutate sul valore minimo del range (segnalato).
+
+## Privacy: il codice non esce dal PC
+- **Un solo punto di uscita** (`src/privacy.js`): ogni richiesta di rete passa da `guardedFetch`, che consente **solo** l'host dell'AI che configuri tu (e, se la abiliti, quello di OSV per le CVE: solo nome+versione dei pacchetti). Qualsiasi altro host, redirect o http verso host non locali è bloccato e registrato.
+- **Modalità offline**: blocca tutto; l'analisi è comunque completa (0 token).
+- **Segreti oscurati prima dell'invio** all'AI (chiavi, token, password, Bearer, email, IP, blob lunghi). Opzione `sendCode=false`: all'AI arrivano solo nome file e tipo di segnalazione, mai righe di codice.
+- **CVE disattivata di default** (opt-in).
+- **Registro** delle connessioni in uscita (host, scopo, byte, mai contenuto) visibile in Configurazione.
+- **Dati fuori dal repo**: report, cache, quote e chiavi in `~/.testerai` (0600/0700), non nella cartella del progetto né in quella analizzata. Nessun telemetry, nessuna CDN: il FE è tutto locale.
+- **git** viene eseguito con protocolli remoti disabilitati (nessun fetch/push); il server accetta solo Host locali (anti DNS-rebinding).
+- Nota: i **documenti di contesto** che carichi, e i frammenti selezionati, vanno all'AI che hai configurato: sono sotto il tuo controllo.
 
 ## Sicurezza
 Ascolta solo su 127.0.0.1, controllo Origin sulle API, `execFile` senza shell, ref git validati. La config è in `data/config.json` (0600, ignorata da git).

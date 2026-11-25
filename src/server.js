@@ -8,6 +8,7 @@ import * as G from './git.js';
 import { analyze, listReports, getReport, setChecked, setReviewState, toMarkdown } from './analyzer.js';
 import { callModel } from './ai.js';
 import { readUsage, setUsed } from './usage.js';
+import { allowedDestinations, readEgressLog } from './privacy.js';
 
 const PUB = path.join(ROOT, 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
@@ -31,6 +32,9 @@ export function createServer() {
   return http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://x');
     try {
+      // Anti DNS-rebinding: accetta solo Host locali (o quello esplicitamente servito)
+      const hh = String(req.headers.host || '').replace(/:\d+$/, '');
+      if (!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(hh) && hh !== (process.env.HOST || '')) return send(res, 403, { error: 'host non consentito' });
       // Difesa CSRF/DNS-rebinding: l'API accede al filesystem locale.
       const origin = req.headers.origin;
       if (u.pathname.startsWith('/api/') && origin && new URL(origin).host !== req.headers.host) return send(res, 403, { error: 'origin non consentito' });
@@ -49,6 +53,7 @@ export function createServer() {
       }
       if (req.method === 'PUT' && u.pathname === '/api/usage') setUsed((await readBody(req)).used);
       if ((req.method === 'GET' || req.method === 'PUT') && u.pathname === '/api/usage') { const u2 = readUsage(), lim = loadConfig().budget.monthlyTokens; return send(res, 200, { month: u2.month, used: u2.used, limit: lim, remaining: Math.max(0, lim - u2.used), calls: u2.calls }); }
+      if (req.method === 'GET' && u.pathname === '/api/privacy') return send(res, 200, { ...allowedDestinations(), dataDir: (await import('./config.js')).DATA, log: readEgressLog(50) });
       if (u.pathname === '/api/config') {
         if (req.method === 'GET') return send(res, 200, publicConfig());
         if (req.method === 'PUT') return send(res, 200, publicConfig(saveConfig(await readBody(req))));

@@ -63,7 +63,7 @@ test('CVE: dipendenze cambiate verificate su OSV (mock), cache, errore di rete g
   g('checkout', '-q', 'main'); g('checkout', '-qb', 'feature/deps');
   fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ dependencies: { lodash: '4.17.15', express: '^4.19.0' } }));
   g('add', '.'); g('commit', '-qm', 'add deps');
-  saveConfig({ analysis: { cve: { osvUrl: url, cacheHours: 24 } } });
+  saveConfig({ analysis: { cve: { enabled: true, osvUrl: url, cacheHours: 24 } } });
   const r = await analyze({ repo, branch: 'feature/deps', base: 'main', useAI: false });
   const cve = r.findings.find((f) => f.rule === 'DEP-CVE');
   assert.ok(cve && cve.severity === 'high' && /CVE-2021-23337/.test(cve.message) && /4\.17\.21/.test(cve.message));
@@ -141,4 +141,35 @@ test('revisione riga per riga: tag logica/regressione, decisioni persistenti, fi
   assert.ok(rep3.review.resolved.length >= 1, 'fix verificato');
   assert.equal(rep3.review.stats.fix, 0);
   assert.match(toMarkdown(rep3), /Revisione modifiche/);
+});
+
+test('privacy: uscite solo verso AI configurata, segreti oscurati, offline e sendCode=false', async () => {
+  const { guardedFetch, redact, readEgressLog } = await import('../src/privacy.js');
+  const bodies = [];
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => { bodies.push(b); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: '{"b":[],"f":[],"a":[]}' } }], usage: { prompt_tokens: 50, completion_tokens: 5 } })); }); }).listen(0);
+  const base = `http://127.0.0.1:${srv.address().port}/v1`;
+  fs.writeFileSync(path.join(process.env.TESTERAI_DATA, 'usage.json'), '{}');
+  saveConfig({ ai: { enabled: true, baseUrl: base, model: 'm', apiKey: 'k' }, budget: { cache: false }, privacy: { offline: false, sendCode: true, redactSecrets: true } });
+  // host non configurato -> bloccato (e registrato)
+  await assert.rejects(guardedFetch('https://example.com/x', { method: 'GET' }, 'ai'), /bloccata/);
+  await assert.rejects(guardedFetch('https://api.osv.dev/v1/querybatch', { method: 'POST', body: '{}' }, 'cve'), /bloccata/); // cve disabilitato
+  assert.ok(readEgressLog().some((e) => e.host === 'example.com' && e.blocked));
+  // i segreti non arrivano all'AI
+  g('checkout', '-q', 'feature/x');
+  await analyze({ repo, branch: 'feature/x', useAI: true });
+  assert.ok(bodies.length >= 1);
+  for (const b of bodies) { assert.ok(!b.includes('SuperSecret123'), 'segreto inviato!'); }
+  assert.equal(redact('const t = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"; a@b.com 10.1.2.3'), 'const t = "[REDACTED:TOKEN]"; [EMAIL] [IP]');
+  // sendCode=false -> nessuna riga di codice
+  bodies.length = 0; fs.writeFileSync(path.join(process.env.TESTERAI_DATA, 'usage.json'), '{}');
+  saveConfig({ privacy: { sendCode: false } });
+  await analyze({ repo, branch: 'feature/x', useAI: true });
+  for (const b of bodies) assert.ok(!/eval\(|SELECT \*|password/i.test(JSON.parse(b).messages[1].content.replace(/SEC-[A-Z-]+/g, '')), 'codice inviato con sendCode=false');
+  // offline -> nessuna richiesta
+  bodies.length = 0; saveConfig({ privacy: { offline: true } });
+  const off = await analyze({ repo, branch: 'feature/x', useAI: true });
+  assert.equal(bodies.length, 0); assert.match(off.ai.note, /offline/i);
+  await assert.rejects(guardedFetch(base + '/chat/completions', { method: 'POST', body: '{}' }, 'ai'), /offline/);
+  saveConfig({ privacy: { offline: false, sendCode: true } });
+  srv.close();
 });

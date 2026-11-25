@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { git, safeRef } from './git.js';
 import { DATA } from './config.js';
+import { guardedFetch } from './privacy.js';
 
 // Verifica CVE delle SOLE dipendenze aggiunte/cambiate nel branch (non l'intero albero) tramite OSV.dev.
 // Costo AI: 0 token. Risultati in cache su disco per ridurre le chiamate di rete.
@@ -80,7 +81,7 @@ const fixedIn = (v, name) => {
   return null;
 };
 async function osv(base, pathname, body, timeoutMs) {
-  const res = await fetch(base.replace(/\/+$/, '') + pathname, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(timeoutMs) });
+  const res = await guardedFetch(base.replace(/\/+$/, '') + pathname, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(timeoutMs) }, 'cve');
   if (!res.ok) throw new Error(`OSV ${res.status}`);
   return res.json();
 }

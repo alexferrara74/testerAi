@@ -138,22 +138,23 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   }
 
   /* --- AI (opzionale, a budget) --- */
-  const aiInfo = { used: false, provider: cfg.ai.provider, model: cfg.ai.model, maxContextTokens: cfg.budget.maxContextTokens, monthlyLimit: cfg.budget.monthlyTokens, spent: 0, calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, skipped: 0, errors: [], note: '' };
-  if (useAI && cfg.ai.enabled && cfg.ai.model) {
+  const aiInfo = { privacy: { sendCode: cfg.privacy.sendCode, redact: cfg.privacy.redactSecrets, offline: cfg.privacy.offline }, used: false, provider: cfg.ai.provider, model: cfg.ai.model, maxContextTokens: cfg.budget.maxContextTokens, monthlyLimit: cfg.budget.monthlyTokens, spent: 0, calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, skipped: 0, errors: [], note: '' };
+  if (useAI && cfg.ai.enabled && cfg.ai.model && !cfg.privacy.offline) {
     onProgress('Triage AI (budget ' + cfg.budget.maxContextTokens + ' token/chiamata)');
     // Risparmio token: le regole "certe" (chiavi, conflitti...) NON vanno all'AI. Solo i casi ambigui,
     // poi le regressioni (simbolo+file), infine gli hunk rischiosi, finche' la quota lo permette.
     const CERTAIN = new Set(['SEC-SECRET-PRIVKEY', 'SEC-SECRET-AWS', 'SEC-SECRET-TOKEN', 'ERR-CONFLICT', 'SEC-SENSITIVE-FILE']);
+    const noCode = !cfg.privacy.sendCode;
     const items = []; const byId = new Map(findings.map((f) => [f.id, f]));
     const cut = (x, n) => String(x || '').trim().replace(/\s+/g, ' ').slice(0, n);
     for (const f of findings) {
       if (CERTAIN.has(f.rule) || SEV[f.severity] < 3) continue;
-      if (f.code && f.line) items.push({ id: f.id, priority: 200 + SEV[f.severity], text: `${f.id}|${path.basename(f.file)}:${f.line}|${cut(f.code, 90)}` });
-      else if (f.rule.startsWith('REG-')) items.push({ id: f.id, priority: 150, text: `${f.id}|${path.basename(f.file)}|${cut(f.message, 90)}` });
+      if (f.code && f.line) items.push({ id: f.id, priority: 200 + SEV[f.severity], text: `${f.id}|${path.basename(f.file)}:${f.line}|${noCode ? f.rule : cut(f.code, 90)}` });
+      else if (f.rule.startsWith('REG-')) items.push({ id: f.id, priority: 150, text: `${f.id}|${path.basename(f.file)}|${noCode ? f.rule : cut(f.message, 90)}` });
     }
     const flagged = new Set(findings.map((f) => f.file));
     let hid = 0;
-    for (const [file, d] of diff) {
+    for (const [file, d] of noCode ? [] : diff) {
       if (ignored(cfg, file) || !R.isSourcePath(file)) continue;
       const score = (R.isRiskyPath(file) ? 30 : 0) + Math.min(20, d.hunks.reduce((s, h) => s + h.removed.length, 0)) + (flagged.has(file) ? 0 : 5);
       if (score < 15) continue;
@@ -162,7 +163,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
       if (code.length > 12) items.push({ id: 'H' + ++hid, priority: score, text: `H${hid}|${path.basename(file)}:${h.newStart}|${code}`, file, line: h.newStart, code });
     }
     const kw = [...files.map((f) => path.basename(f.path).replace(/\.\w+$/, '')), ...commits.flatMap((c) => c.subject.split(/\W+/))];
-    const docsText = retrieveDocs(docs, kw, cfg.budget.docTokens);
+    const docsText = noCode ? '' : retrieveDocs(docs, kw, cfg.budget.docTokens);
     try {
       const r = await triage(cfg, items, docsText, { snippet: (f, a, b) => G.showLines(repo, branch, f, a, b) });
       Object.assign(aiInfo, { used: true, ...r.usage, skipped: r.skipped, errors: r.errors });
@@ -172,7 +173,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
       }
       for (const id of r.fp) { const f = byId.get(id); if (f) { f.ai = 'falso positivo'; f.severityOriginal = f.severity; f.severity = 'info'; } }
     } catch (e) { aiInfo.errors.push(e.message); }
-  } else aiInfo.note = useAI ? 'AI non abilitata/configurata: analisi solo statica (0 token).' : 'AI disattivata per questa analisi.';
+  } else aiInfo.note = cfg.privacy.offline ? 'Modalità offline: nessun dato lascia il PC.' : useAI ? 'AI non abilitata/configurata: analisi solo statica (0 token).' : 'AI disattivata per questa analisi.';
 
   findings.sort((a, b) => SEV[b.severity] - SEV[a.severity]);
 

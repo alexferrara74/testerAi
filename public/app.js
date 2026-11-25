@@ -23,6 +23,14 @@ async function quota() {
     if ($('quota')) $('quota').textContent = `${u.used}/${u.limit}`; if ($('u_used')) $('u_used').value = u.used; } catch {}
 }
 quota();
+async function privacy() {
+  try { const p = await api('/api/privacy'); const d = p.destinations;
+    $('netTxt').innerHTML = p.offline ? 'Offline: nessuna connessione' : d.length ? d.map((x) => `${x.purpose.toUpperCase()} → ${esc(x.host)}`).join('<br>') : 'Nessuna uscita attiva';
+    if ($('p_dir')) { $('p_dir').textContent = p.dataDir;
+      $('p_dest').innerHTML = '<b>Destinazioni consentite ora</b>' + (p.offline ? '<div class="hint">nessuna (offline)</div>' : d.map((x) => `<div class="hint">• <b>${esc(x.host)}</b> (${x.purpose}) — invia: ${esc(x.sends)}</div>`).join('') || '<div class="hint">nessuna</div>');
+      $('p_log').innerHTML = p.log.map((e) => `<div>${esc(e.t.slice(11, 19))} ${esc(e.purpose)} ${esc(e.host)}${esc(e.path || '')} ${e.blocked ? '<span style="color:var(--crit)">BLOCCATA: ' + esc(e.blocked) + '</span>' : e.bytes + ' B → ' + e.status}</div>`).join('') || '<span class="hint">nessuna connessione registrata</span>'; } } catch {}
+}
+privacy();
 
 /* ---------- picker cartella ---------- */
 let cur = '';
@@ -229,7 +237,8 @@ function item(i) {
 /* ---------- config ---------- */
 const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'timeoutMs'], BF = ['monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
 async function loadCfg() {
-  quota(); const c = await api('/api/config');
+  quota(); privacy(); const c = await api('/api/config');
+  $('p_offline').checked = c.privacy.offline; $('p_sendCode').checked = c.privacy.sendCode; $('p_redact').checked = c.privacy.redactSecrets; $('p_http').checked = c.privacy.allowHttp;
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled;
   BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;
   $('a_maxCommits').value = c.analysis.maxCommits; $('a_maxReview').value = c.analysis.maxReviewItems; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours;
@@ -238,8 +247,8 @@ $('save').onclick = async () => {
   try {
     const ai = { enabled: $('c_enabled').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value); ai.timeoutMs = +ai.timeoutMs || 60000;
     const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = +$('b_' + k).value);
-    await post('/api/config', { ai, budget, analysis: { maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
-    $('cmsg').textContent = 'Valori incoerenti riportati nei limiti: mese ≥ analisi ≥ chiamata'; toast('✔ Configurazione salvata'); loadCfg();
+    await post('/api/config', { ai, budget, privacy: { offline: $('p_offline').checked, sendCode: $('p_sendCode').checked, redactSecrets: $('p_redact').checked, allowHttp: $('p_http').checked }, analysis: { maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
+    $('cmsg').textContent = 'Valori incoerenti riportati nei limiti: mese ≥ analisi ≥ chiamata'; toast('✔ Configurazione salvata'); loadCfg(); privacy();
   } catch (e) { toast('❌ ' + e.message); }
 };
 $('test').onclick = async () => { $('cmsg').textContent = 'test…'; try { const r = await post('/api/config/test', {}); $('cmsg').textContent = ''; toast('✔ Connessione ok'); quota(); } catch (e) { $('cmsg').textContent = ''; toast('❌ ' + e.message); } };

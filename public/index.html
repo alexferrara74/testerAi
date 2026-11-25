@@ -7,6 +7,7 @@
  <button class="nav" data-v="rep">▤ Report</button>
  <button class="nav" data-v="cfg">⚙ Configurazione</button>
  <div class="spacer"></div>
+ <div class="gauge" id="net" style="margin-bottom:8px"><b>🔒 RETE</b><div class="hint" id="netTxt"></div></div>
  <div class="gauge"><b>TOKEN AI · <span id="gMonth"></span></b><div class="bar"><i id="gBar" style="width:0"></i></div><div class="hint" id="gTxt"></div></div>
  <button class="nav" id="theme">◐ Tema</button>
 </aside>
@@ -29,6 +30,13 @@
 <section id="v-rep" class="hide"><div id="repList"></div><div id="rep"></div></section>
 <section id="v-cfg" class="hide">
  <h2>Configurazione</h2><p class="sub">Provider AI, quote token e verifica CVE. Le chiavi non vengono mai rimostrate.</p>
+ <div class="card" style="border-color:var(--ok)"><h3>🔒 Privacy — il codice non esce dal tuo PC</h3>
+  <p class="hint" style="margin-top:0">L'unica uscita di rete possibile è verso <b>l'AI che configuri qui sotto</b> (e, solo se la abiliti, verso OSV per le CVE: nomi e versioni dei pacchetti, mai codice). Ogni altra connessione è bloccata dal codice. Report, cache e chiavi stanno in <span class="mono" id="p_dir"></span>, fuori dal repository.</p>
+  <label class="chkl"><input type="checkbox" id="p_offline"> Modalità offline: blocca TUTTE le connessioni (analisi solo statica, 0 token)</label>
+  <label class="chkl"><input type="checkbox" id="p_sendCode"> Consenti all'AI di ricevere frammenti di codice (se spento: solo nome file e tipo di segnalazione)</label>
+  <label class="chkl"><input type="checkbox" id="p_redact"> Oscura chiavi, token, password, email e IP prima di ogni invio</label>
+  <label class="chkl"><input type="checkbox" id="p_http"> Consenti http non cifrato verso host non locali (sconsigliato)</label>
+  <div id="p_dest" style="margin-top:12px"></div><details style="margin-top:8px"><summary class="hint">Registro delle connessioni in uscita (solo metadati, mai contenuto)</summary><div id="p_log" class="mono" style="margin-top:6px"></div></details></div>
  <div class="card"><h3>🤖 Provider AI</h3><div class="grid g3">
   <div><label>Provider</label><select id="c_provider"><option value="openai">OpenAI-compatibile (Copilot / Azure / gateway)</option><option value="anthropic">Anthropic (Claude)</option><option value="ollama">Ollama / locale</option></select></div>
   <div><label>Base URL</label><input id="c_baseUrl"></div><div><label>Modello / deployment</label><input id="c_model"></div>
@@ -40,7 +48,7 @@
   <div class="grid g3"><div><label>Quota mensile totale</label><input id="b_monthlyTokens" type="number"></div><div><label>Max per analisi</label><input id="b_perAnalysisTokens" type="number"></div><div><label>Max per chiamata</label><input id="b_maxContextTokens" type="number"></div>
   <div><label>Output max</label><input id="b_maxOutputTokens" type="number"></div><div><label>Chiamate max</label><input id="b_maxCalls" type="number"></div><div><label>Round di domande</label><input id="b_maxRounds" type="number"></div><div><label>Token per i documenti</label><input id="b_docTokens" type="number"></div></div>
   <label class="chkl"><input type="checkbox" id="b_cache"> Cache risposte (0 token sui re-run identici)</label></div>
- <div class="card"><h3>📦 Analisi e CVE</h3><div class="grid g3"><div><label>Commit max analizzati</label><input id="a_maxCommits" type="number"></div><div><label>Voci di revisione max</label><input id="a_maxReview" type="number"></div><div><label>URL OSV (o mirror interno)</label><input id="a_osvUrl"></div><div><label>Cache CVE (ore)</label><input id="a_cacheHours" type="number"></div></div><label class="chkl"><input type="checkbox" id="a_cveOn"> Verifica CVE abilitata (0 token)</label></div>
+ <div class="card"><h3>📦 Analisi e CVE</h3><div class="grid g3"><div><label>Commit max analizzati</label><input id="a_maxCommits" type="number"></div><div><label>Voci di revisione max</label><input id="a_maxReview" type="number"></div><div><label>URL OSV (o mirror interno)</label><input id="a_osvUrl"></div><div><label>Cache CVE (ore)</label><input id="a_cacheHours" type="number"></div></div><label class="chkl"><input type="checkbox" id="a_cveOn"> Verifica CVE abilitata (invia a OSV solo nome+versione dei pacchetti modificati; disattivata di default)</label></div>
  <div class="row"><button class="btn p" id="save">Salva</button><button class="btn" id="test">Test connessione (~15 token)</button><span class="hint" id="cmsg"></span></div>
 </section>
 </main>

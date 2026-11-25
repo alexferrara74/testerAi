@@ -1,9 +1,11 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const DATA = process.env.TESTERAI_DATA || path.join(ROOT, 'data');
+// Dati (report, cache, chiavi) FUORI dal repository del progetto: non possono finire in un commit.
+export const DATA = process.env.TESTERAI_DATA || path.join(os.homedir(), '.testerai');
 const FILE = path.join(DATA, 'config.json');
 
 export const DEFAULTS = {
@@ -30,11 +32,17 @@ export const DEFAULTS = {
     docTokens: 60,               // quota di contesto riservata ai documenti in input
     cache: true,
   },
+  privacy: {
+    offline: false,             // blocca QUALSIASI connessione in uscita (analisi solo statica)
+    sendCode: true,             // false = all'AI vanno solo metadati, mai righe di codice
+    redactSecrets: true,        // oscura chiavi/token/password/email/IP prima di ogni invio
+    allowHttp: false,           // consente http non cifrato verso host non locali
+  },
   analysis: {
     maxFilesDetail: 300,
     maxCommits: 100,
     maxReviewItems: 500,
-    cve: { enabled: true, osvUrl: 'https://api.osv.dev', cacheHours: 24, timeoutMs: 10000 },
+    cve: { enabled: false, osvUrl: 'https://api.osv.dev', cacheHours: 24, timeoutMs: 10000 },
     maxHunkLinesPerFile: 150,
     ignorePaths: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'dist/', 'build/', 'node_modules/', '.min.'],
   },
@@ -61,6 +69,7 @@ export function saveConfig(patch) {
   const next = merge(cur, patch);
   next.ai.provider = ['openai', 'anthropic', 'ollama'].includes(next.ai.provider) ? next.ai.provider : 'openai';
   if (typeof next.ai.extraHeaders === 'string') { try { next.ai.extraHeaders = JSON.parse(next.ai.extraHeaders || '{}'); } catch { throw new Error('extraHeaders non e\' JSON valido'); } }
+  for (const k of ['offline', 'sendCode', 'redactSecrets', 'allowHttp']) next.privacy[k] = !!next.privacy[k];
   next.analysis.cve.cacheHours = num(next.analysis.cve.cacheHours, 0, 720, 24);
   next.analysis.cve.timeoutMs = num(next.analysis.cve.timeoutMs, 1000, 60000, 10000);
   next.analysis.maxReviewItems = num(next.analysis.maxReviewItems, 20, 5000, 500);
@@ -73,7 +82,7 @@ export function saveConfig(patch) {
   b.maxCalls = num(b.maxCalls, 1, 50, 3);
   b.maxRounds = num(b.maxRounds, 0, 3, 1);
   b.docTokens = num(b.docTokens, 0, Math.floor(b.maxContextTokens / 3), 60);
-  fs.mkdirSync(DATA, { recursive: true });
+  fs.mkdirSync(DATA, { recursive: true, mode: 0o700 });
   fs.writeFileSync(FILE, JSON.stringify(next, null, 2), { mode: 0o600 });
   return next;
 }

@@ -4,6 +4,8 @@ import path from 'node:path';
 import { DATA } from './config.js';
 import { estimate, fit } from './tokens.js';
 import { remaining, record, readUsage } from './usage.js';
+import { guardedFetch, redact } from './privacy.js';
+import { loadConfig } from './config.js';
 
 /* ---------------- Provider layer ---------------- */
 export async function callModel(ai, system, user, maxOut) {
@@ -23,7 +25,7 @@ export async function callModel(ai, system, user, maxOut) {
     if (ai.apiKey) headers[ai.authHeader || 'Authorization'] = ai.authScheme ? `${ai.authScheme} ${ai.apiKey}` : ai.apiKey;
     body = { model: ai.model, max_tokens: maxOut, temperature: ai.temperature, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
   }
-  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(ai.timeoutMs || 60000) });
+  const res = await guardedFetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(ai.timeoutMs || 60000) }, 'ai');
   const raw = await res.text();
   if (!res.ok) throw new Error(`AI ${res.status}: ${raw.slice(0, 200)}`);
   const j = JSON.parse(raw);
@@ -71,6 +73,7 @@ export async function triage(cfg, items, docsText, ctx) {
   const sent = new Set();
 
   const ask = async (user, note) => {
+    if (cfg.privacy.redactSecrets) user = redact(user); // ultima barriera: nulla di sensibile esce
     const key = crypto.createHash('sha1').update(`${ai.provider}|${ai.model}|${user}`).digest('hex');
     const c = loadCache();
     if (budget.cache && c[key]) { usage.cached++; return c[key]; }
@@ -104,7 +107,7 @@ export async function triage(cfg, items, docsText, ctx) {
       for (let round = 0; round < budget.maxRounds && asks.length && usage.calls < budget.maxCalls && room() >= 60; round++) {
         const [file, from, to] = asks[0];
         const f = Number(from) || 1, t = Math.min(Number(to) || f + 12, f + 20);
-        const lines = await ctx.snippet(String(file), f, t);
+        const lines = cfg.privacy.sendCode ? await ctx.snippet(String(file), f, t) : [];
         if (!lines.length) break;
         const ctxTxt = fit(`CTX ${file}\n${lines.join('\n')}`, Math.floor(room() * 0.6));
         const pending = batch.filter((i) => !res.bug.has(i.id) && !res.fp.has(i.id)).map((i) => i.text).join('\n');
