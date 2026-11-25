@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>testerAi – Analisi branch</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1c2430;--mut:#667085;--bd:#dfe3ea;--ac:#2b59c3;--crit:#b42318;--high:#d92d20;--med:#dc6803;--low:#667085;--ok:#067647}
+@media(prefers-color-scheme:dark){:root{--bg:#12151b;--card:#1b2029;--tx:#e6e9ef;--mut:#98a2b3;--bd:#2c3340;--ac:#7aa2ff;--ok:#47cd89}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{display:flex;gap:16px;align-items:center;padding:10px 20px;background:var(--card);border-bottom:1px solid var(--bd)}
+header h1{font-size:16px;margin:0 16px 0 0}nav button{background:none;border:0;padding:8px 12px;cursor:pointer;color:var(--mut);font:inherit;border-bottom:2px solid transparent}
+nav button.on{color:var(--ac);border-color:var(--ac)}main{max-width:1100px;margin:16px auto;padding:0 16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:14px;margin-bottom:14px}
+label{display:block;font-size:12px;color:var(--mut);margin:8px 0 3px}input,select,textarea{width:100%;padding:7px 9px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--tx);font:inherit}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+button.p{background:var(--ac);color:#fff;border:0;border-radius:6px;padding:8px 14px;cursor:pointer;font:inherit}button.s{background:none;border:1px solid var(--bd);color:var(--tx);border-radius:6px;padding:7px 12px;cursor:pointer;font:inherit}
+.hint{color:var(--mut);font-size:12px}.tag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600;color:#fff}
+.critical{background:var(--crit)}.high{background:var(--high)}.medium{background:var(--med)}.low,.info{background:var(--low)}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--bd);vertical-align:top}th{font-size:12px;color:var(--mut)}
+code,.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}.A{color:var(--ok)}.D{color:var(--crit)}.M{color:var(--med)}.R{color:var(--ac)}
+.add{color:var(--ok)}.del{color:var(--crit)}.stat{display:inline-block;margin-right:18px}.stat b{font-size:20px;display:block}
+.modal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center}.modal.on{display:flex}.modal .card{width:560px;max-height:80vh;overflow:auto}
+.dir{padding:5px 8px;cursor:pointer;border-radius:4px}.dir:hover{background:var(--bg)}.hide{display:none}details{margin:2px 0}summary{cursor:pointer}
+.chk{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--bd)}.pass{color:var(--ok)}.warn{color:var(--med)}.fail{color:var(--crit)}
+</style></head><body>
+<header><h1>🔎 testerAi</h1><nav id="nav"><button data-t="an" class="on">Analisi</button><button data-t="rep">Report</button><button data-t="cfg">Configurazione AI</button></nav></header>
+<main>
+<section id="t-an">
+ <div class="card">
+  <label>Cartella del repository</label>
+  <div style="display:flex;gap:8px"><input id="path" placeholder="/percorso/al/repo"><button class="s" id="pick">Sfoglia…</button></div>
+  <div class="row">
+   <div><label>Branch da analizzare</label><select id="branch"></select></div>
+   <div><label>Branch base (da cui hai staccato)</label><select id="base"></select><div class="hint" id="baseHint"></div></div>
+  </div>
+  <label>Documenti di contesto (requisiti, linee guida, ADR…) — solo i paragrafi pertinenti vengono inviati all'AI</label>
+  <input type="file" id="docs" multiple accept=".md,.txt,.rst,.json,.yml,.yaml">
+  <textarea id="docsText" rows="3" placeholder="…oppure incolla qui regole/requisiti (es. 'Vietato usare eval', 'Le API devono validare input')"></textarea>
+  <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="useAI" style="width:auto" checked> Usa AI (se configurata) — altrimenti analisi solo statica a 0 token</label>
+  <p><button class="p" id="run">Analizza</button> <span id="prog" class="hint"></span></p>
+ </div>
+</section>
+<section id="t-rep" class="hide"><div class="card"><b>Report salvati</b><div id="list"></div></div><div id="rep"></div></section>
+<section id="t-cfg" class="hide">
+ <div class="card"><b>Provider AI</b>
+  <div class="row">
+   <div><label>Provider</label><select id="c_provider"><option value="openai">OpenAI-compatibile (Copilot / Azure / gateway aziendale)</option><option value="anthropic">Anthropic (Claude)</option><option value="ollama">Ollama / locale</option></select></div>
+   <div><label>Base URL</label><input id="c_baseUrl"></div><div><label>Modello / deployment</label><input id="c_model"></div>
+   <div><label>API key</label><input id="c_apiKey" type="password" autocomplete="off"></div>
+   <div><label>Header auth</label><input id="c_authHeader"></div><div><label>Schema auth (vuoto = solo chiave)</label><input id="c_authScheme"></div>
+   <div><label>api-version (Azure)</label><input id="c_apiVersion"></div><div><label>Timeout ms</label><input id="c_timeoutMs" type="number"></div>
+  </div>
+  <label>Header extra (JSON)</label><input id="c_extraHeaders" placeholder='{"X-Team":"abc"}'>
+  <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="c_enabled" style="width:auto"> AI abilitata</label>
+ </div>
+ <div class="card"><b>Budget token</b> <span class="hint">limite aziendale per singola chiamata</span>
+  <div class="row">
+   <div><label>Contesto max (input+output)</label><input id="b_maxContextTokens" type="number"></div><div><label>Output max</label><input id="b_maxOutputTokens" type="number"></div>
+   <div><label>Chiamate max per analisi</label><input id="b_maxCalls" type="number"></div><div><label>Round di domande/batch</label><input id="b_maxRounds" type="number"></div>
+   <div><label>Token riservati ai documenti</label><input id="b_docTokens" type="number"></div>
+  </div>
+  <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="b_cache" style="width:auto"> Cache risposte (zero token sui re-run identici)</label>
+ </div>
+ <button class="p" id="save">Salva</button> <button class="s" id="test">Test connessione</button> <span id="cmsg" class="hint"></span>
+</section>
+</main>
+<div class="modal" id="modal"><div class="card"><div style="display:flex;gap:8px"><b style="flex:1" id="mpath" class="mono"></b><button class="s" id="mclose">✕</button></div><div id="mlist"></div><p><button class="p" id="mok">Seleziona questa cartella</button></p></div></div>
+<script src="app.js"></script></body></html>
