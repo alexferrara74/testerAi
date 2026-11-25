@@ -50,6 +50,34 @@ test('analisi per commit: attribuzione, segreto poi rimosso resta in cronologia'
   assert.equal(r.summary.commitsAnalyzed, r.summary.commits);
 });
 
+test('CVE: dipendenze cambiate verificate su OSV (mock), cache, errore di rete gestito', async () => {
+  let hits = 0;
+  const osv = http.createServer((req, res) => {
+    let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
+      hits++; res.setHeader('content-type', 'application/json');
+      if (req.url === '/v1/querybatch') return res.end(JSON.stringify({ results: JSON.parse(b).queries.map((q) => (q.package.name === 'lodash' ? { vulns: [{ id: 'GHSA-xxxx' }] } : {})) }));
+      res.end(JSON.stringify({ id: 'GHSA-xxxx', aliases: ['CVE-2021-23337'], summary: 'Command injection', database_specific: { severity: 'HIGH' }, affected: [{ package: { name: 'lodash' }, ranges: [{ events: [{ introduced: '0' }, { fixed: '4.17.21' }] }] }] }));
+    });
+  }).listen(0);
+  const url = `http://127.0.0.1:${osv.address().port}`;
+  g('checkout', '-q', 'main'); g('checkout', '-qb', 'feature/deps');
+  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ dependencies: { lodash: '4.17.15', express: '^4.19.0' } }));
+  g('add', '.'); g('commit', '-qm', 'add deps');
+  saveConfig({ analysis: { cve: { osvUrl: url, cacheHours: 24 } } });
+  const r = await analyze({ repo, branch: 'feature/deps', base: 'main', useAI: false });
+  const cve = r.findings.find((f) => f.rule === 'DEP-CVE');
+  assert.ok(cve && cve.severity === 'high' && /CVE-2021-23337/.test(cve.message) && /4\.17\.21/.test(cve.message));
+  assert.equal(r.checklist.find((c) => c.id === 'c13').status, 'fail');
+  const h = hits;
+  await analyze({ repo, branch: 'feature/deps', base: 'main', useAI: false });
+  assert.equal(hits, h, 'cache: nessuna nuova richiesta di rete');
+  osv.close();
+  saveConfig({ analysis: { cve: { osvUrl: 'http://127.0.0.1:1', cacheHours: 0 } } });
+  const r2 = await analyze({ repo, branch: 'feature/deps', base: 'main', useAI: false });
+  assert.equal(r2.checklist.find((c) => c.id === 'c13').status, 'warn');
+  g('checkout', '-q', 'feature/x');
+});
+
 test('AI: quota mensile 2000 mai superata, cache e stop a quota esaurita', async () => {
   const seen = [];
   const srv = http.createServer((req, res) => {

@@ -71,6 +71,7 @@ async function showReport(id) {
   <div class="card"><b>Modifiche rispetto a ${esc(r.base)}</b> <span class="hint">(${Object.entries(s.byStatus).map(([k, v]) => k + ':' + v).join(' ')})</span>
    ${r.files.map((f) => `<details><summary><span class="${f.status} mono">${f.status}</span> <code>${f.oldPath ? esc(f.oldPath) + ' → ' : ''}${esc(f.path)}</code> <span class="add">+${f.add}</span> <span class="del">-${f.del}</span></summary>
    <pre class="mono" style="margin:4px 0 8px;overflow:auto">${f.changes.map((l) => `<span class="${l.k === '+' ? 'add' : 'del'}">${l.k}${String(l.n).padStart(4)} ${esc(l.t)}</span>`).join('\n')}${f.truncated ? '\n…troncato' : ''}${f.binary ? 'binario' : ''}</pre></details>`).join('')}</div>
+  ${r.deps && r.deps.length ? `<div class="card"><b>📦 Dipendenze modificate</b> <span class="hint">CVE da OSV.dev${r.cve.error ? ' · ⚠ ' + esc(r.cve.error) : ''}</span><table><tr><th>Pacchetto</th><th>Da</th><th>A</th><th>CVE</th></tr>${r.deps.map((d) => `<tr><td class="mono">${esc(d.ecosystem)}:${esc(d.name)}</td><td>${esc(d.from || '-')}</td><td>${esc(d.to)}</td><td>${d.vulns === null ? '<span class="hint">non verificato</span>' : d.vulns.length ? d.vulns.map((v) => `<span class="tag ${v.severity}">${esc(v.cve || v.id)}</span>`).join(' ') : '<span class="add">nessuna</span>'}</td></tr>`).join('')}</table></div>` : ''}
   <div class="card"><b>Commit</b> <span class="hint">analisi per commit a 0 token${s_note(r)}</span>${r.commits.map((c) => `<details><summary><span class="mono">${c.short}</span> ${esc(c.subject)}${c.merge ? ' <span class="hint">(merge)</span>' : ''} <span class="hint">${esc(c.author)} · ${c.files} file</span> <span class="add">+${c.add}</span> <span class="del">-${c.del}</span>${c.analysis ? ` ${riskTag(c.analysis)}` : ''}</summary>
    ${c.analysis ? `<div style="margin:4px 0 8px 18px">${c.analysis.files.map((f) => `<div class="mono"><span class="${f.status}">${f.status}</span> ${esc(f.oldPath ? f.oldPath + ' → ' : '')}${esc(f.path)}</div>`).join('')}
    ${c.analysis.findings.map((f) => `<div><span class="tag ${f.severity}">${f.severity}</span> <span class="mono">${esc(f.file)}${f.line ? ':' + f.line : ''}</span> ${esc(f.message)}${f.fixedLater ? ' <span class="hint">✔ corretto in un commit successivo</span>' : ''}</div>`).join('')}
@@ -87,14 +88,14 @@ async function loadCfg() {
   quota();
   const c = await api('/api/config');
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled;
-  BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('a_maxCommits').value = c.analysis.maxCommits; $('b_cache').checked = c.budget.cache;
+  BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('a_maxCommits').value = c.analysis.maxCommits; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours; $('b_cache').checked = c.budget.cache;
 }
 $('save').onclick = async () => {
   try {
     const ai = { enabled: $('c_enabled').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value);
     ai.timeoutMs = +ai.timeoutMs || 60000;
     const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = +$('b_' + k).value);
-    await post('/api/config', { ai, budget, analysis: { maxCommits: +$('a_maxCommits').value } }, 'PUT'); $('cmsg').textContent = '✔ salvato (i valori incoerenti vengono riportati nei limiti: mese ≥ analisi ≥ chiamata)'; loadCfg();
+    await post('/api/config', { ai, budget, analysis: { maxCommits: +$('a_maxCommits').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT'); $('cmsg').textContent = '✔ salvato (i valori incoerenti vengono riportati nei limiti: mese ≥ analisi ≥ chiamata)'; loadCfg();
   } catch (e) { $('cmsg').textContent = '❌ ' + e.message; }
 };
 $('test').onclick = async () => { $('cmsg').textContent = 'test…'; try { const r = await post('/api/config/test', {}); $('cmsg').textContent = '✔ ok ' + JSON.stringify(r.tokens); } catch (e) { $('cmsg').textContent = '❌ ' + e.message; } };

@@ -24,8 +24,11 @@ Il limite è un **contatore mensile persistente** (`data/usage.json`, si azzera 
 - **Cache** su disco: stessa richiesta = 0 token. Il test di connessione costa ~15 token e viene contato.
 - Disattiva "Usa AI" per un'analisi completamente gratuita.
 
+## Verifica CVE delle dipendenze (0 token)
+Confronta manifest e lockfile tra base e branch (`package.json`+`package-lock.json`, `requirements.txt` con versioni `==`, `go.mod`) e interroga [OSV.dev](https://osv.dev) **solo per le dipendenze aggiunte o cambiate**. Per ogni CVE: gravità, versione che la corregge, voce in checklist e tabella nel report. Cache su disco (default 24h) per limitare le chiamate di rete. In azienda l'URL è modificabile da FE (mirror/proxy interno di OSV); se la rete non è raggiungibile l'analisi prosegue e la voce risulta "non verificata". Senza lockfile le versioni `^x.y` sono valutate sul valore minimo del range (segnalato).
+
 ## Sicurezza
 Ascolta solo su 127.0.0.1, controllo Origin sulle API, `execFile` senza shell, ref git validati. La config è in `data/config.json` (0600, ignorata da git).
 
 ## Estensioni previste
-Webhook/CI, regole per linguaggio, analisi per singolo commit, dipendenze vs advisory CVE.
+Webhook/CI, regole per linguaggio.

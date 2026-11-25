@@ -5,6 +5,7 @@ import * as G from './git.js';
 import * as R from './rules.js';
 import { retrieveDocs } from './tokens.js';
 import { analyzeCommits, findingKey } from './commits.js';
+import { changedDeps, checkCves } from './deps.js';
 import { triage } from './ai.js';
 import { loadConfig, DATA } from './config.js';
 
@@ -66,6 +67,18 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   for (const c of commits) {
     if (/^(wip|fix|update|test|\.+|tmp|asd)\b\s*$/i.test(c.subject.trim()) || c.subject.trim().length < 5) add({ rule: 'GIT-MSG', category: 'quality', severity: 'low', file: '', commit: c.short, message: `Messaggio di commit poco descrittivo: "${c.subject}"` });
     if (c.files > 50 || c.add + c.del > 1500) add({ rule: 'GIT-BIG-COMMIT', category: 'quality', severity: 'low', file: '', commit: c.short, message: `Commit molto grande (${c.files} file, +${c.add}/-${c.del})` });
+  }
+
+  /* --- CVE sulle dipendenze aggiunte/cambiate (0 token, OSV.dev) --- */
+  let deps = [], cveInfo = { checked: 0, error: null, disabled: !cfg.analysis.cve.enabled };
+  if (cfg.analysis.cve.enabled && manifests.concat(locks).length) {
+    onProgress('Verifica CVE delle dipendenze modificate');
+    deps = await changedDeps(repo, mb, branch, files.filter((f) => f.status !== 'D').map((f) => f.path));
+    cveInfo = { ...cveInfo, ...(await checkCves(deps, cfg.analysis.cve)) };
+    for (const d of deps) {
+      if (!d.exact) add({ rule: 'DEP-UNPINNED', category: 'security', severity: 'low', file: d.file, message: `${d.name}: versione non bloccata (${d.to}~) senza lockfile: CVE verificate sulla base del range` });
+      for (const v of d.vulns || []) add({ rule: 'DEP-CVE', category: 'security', severity: v.severity, file: d.file, message: `${d.name}@${d.to}: ${v.cve || v.id}${v.summary ? ' – ' + v.summary : ''}${v.fixed ? ` (fix: ${v.fixed})` : ''}` });
+    }
   }
 
   /* --- analisi per singolo commit (0 token) + attribuzione dei problemi al commit che li ha introdotti --- */
@@ -160,6 +173,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     item('c6', 'Le modifiche ai sorgenti sono coperte da test', has('REG-NO-TESTS', 'REG-TEST-DELETED'), 'aggiungere/ripristinare test'),
     item('c7', 'Dipendenze verificate (versioni, lockfile, CVE)', has('DEP-NO-LOCK', 'DEP-CHANGED'), 'controllare i manifest'),
     item('c12', 'Nessun commit introduce segreti o problemi gravi (anche se corretti dopo)', has('SEC-SECRET-HISTORY'), 'ruotare le credenziali e valutare la riscrittura della storia'),
+    { id: 'c13', title: 'Nessuna CVE nelle dipendenze nuove/aggiornate', ...(() => { const v = has('DEP-CVE'); if (cveInfo.disabled) return { status: 'manual', detail: 'verifica CVE disattivata' }; if (cveInfo.error) return { status: 'warn', detail: cveInfo.error }; if (!deps.length) return { status: 'pass', detail: 'nessuna dipendenza modificata' }; return { status: v.length ? (v.some((f) => SEV[f.severity] >= 4) ? 'fail' : 'warn') : 'pass', detail: v.length ? `${v.length} vulnerabilita\' note: aggiornare alla versione corretta` : `${deps.length} dipendenze verificate su OSV` }; })(), checked: false },
     item('c8', 'Commit chiari e di dimensione ragionevole', has('GIT-MSG', 'GIT-BIG-COMMIT'), 'valutare squash/riscrittura messaggi'),
     { id: 'c9', title: `Branch aggiornato rispetto a ${base}`, status: behind ? 'warn' : 'pass', detail: behind ? `${behind} commit di ${base} non ancora integrati: rischio regressioni al merge` : 'allineato', checked: false },
     { id: 'c10', title: 'Working tree pulito (nessuna modifica non committata)', status: dirty.length ? 'warn' : 'pass', detail: dirty.length ? `${dirty.length} file non committati: non analizzati` : 'pulito', checked: false },
@@ -172,7 +186,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     createdAt: new Date().toISOString(), repo, branch, base, baseDetected: !!detected, mergeBase: mb, behind, dirty: dirty.length,
     summary: { commits: commits.length, commitsAnalyzed: perCommit.analyzed, files: files.length, added: files.reduce((s, f) => s + f.add, 0), deleted: files.reduce((s, f) => s + f.del, 0), findings: findings.length, bySeverity: bySev,
       byStatus: files.reduce((o, f) => (o[f.status] = (o[f.status] || 0) + 1, o), {}) },
-    commits, files, findings, checklist, ai: aiInfo,
+    commits, files, findings, checklist, ai: aiInfo, deps, cve: cveInfo,
   };
   fs.mkdirSync(path.join(DATA, 'reports'), { recursive: true });
   fs.writeFileSync(path.join(DATA, 'reports', report.id + '.json'), JSON.stringify(report));
@@ -201,6 +215,7 @@ export function toMarkdown(r) {
   for (const c of r.checklist) L.push(`- [${c.checked ? 'x' : ' '}] ${{ pass: '✅', warn: '⚠️', fail: '❌', manual: '👁️' }[c.status]} **${c.title}** — ${c.detail}`);
   L.push('', '## Modifiche rispetto a ' + r.base, '', '| Stato | File | + | - |', '|---|---|---|---|');
   for (const f of r.files) L.push(`| ${f.status} | ${f.oldPath ? f.oldPath + ' → ' : ''}${f.path} | ${f.add} | ${f.del} |`);
+  if (r.deps?.length) { L.push('', '## Dipendenze modificate', '', '| Pacchetto | Da | A | CVE |', '|---|---|---|---|'); for (const d of r.deps) L.push(`| ${d.ecosystem}:${d.name} | ${d.from || '-'} | ${d.to} | ${d.vulns === null ? 'non verificato' : d.vulns.length ? d.vulns.map((v) => v.cve || v.id).join(', ') : 'nessuna'} |`); }
   L.push('', '## Commit', '');
   for (const c of r.commits) {
     L.push(`- \`${c.short}\` ${c.subject} (${c.author}, ${c.files} file, +${c.add}/-${c.del})${c.analysis ? ` — rischio ${c.analysis.risk}${c.analysis.noTests ? ', senza test' : ''}` : ''}`);
