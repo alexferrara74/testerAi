@@ -21,11 +21,13 @@ export const DEFAULTS = {
     timeoutMs: 60000,
   },
   budget: {
-    maxContextTokens: 2000,      // limite aziendale per singola chiamata (input + output)
-    maxOutputTokens: 300,
-    maxCalls: 8,                 // chiamate AI max per analisi
+    monthlyTokens: 2000,         // TETTO MENSILE aziendale totale (input+output, tutte le analisi)
+    perAnalysisTokens: 400,      // quota massima spendibile da una singola analisi
+    maxContextTokens: 600,       // dimensione massima di una singola chiamata
+    maxOutputTokens: 40,         // risposta minima: solo id
+    maxCalls: 3,                 // chiamate AI max per analisi
     maxRounds: 1,                // domande di approfondimento del modello per batch
-    docTokens: 250,              // quota di contesto riservata ai documenti in input
+    docTokens: 60,               // quota di contesto riservata ai documenti in input
     cache: true,
   },
   analysis: {
@@ -56,11 +58,14 @@ export function saveConfig(patch) {
   const next = merge(cur, patch);
   next.ai.provider = ['openai', 'anthropic', 'ollama'].includes(next.ai.provider) ? next.ai.provider : 'openai';
   if (typeof next.ai.extraHeaders === 'string') { try { next.ai.extraHeaders = JSON.parse(next.ai.extraHeaders || '{}'); } catch { throw new Error('extraHeaders non e\' JSON valido'); } }
-  next.budget.maxContextTokens = num(next.budget.maxContextTokens, 500, 200000, 2000);
-  next.budget.maxOutputTokens = num(next.budget.maxOutputTokens, 50, next.budget.maxContextTokens / 2, 300);
-  next.budget.maxCalls = num(next.budget.maxCalls, 1, 100, 8);
-  next.budget.maxRounds = num(next.budget.maxRounds, 0, 3, 1);
-  next.budget.docTokens = num(next.budget.docTokens, 0, next.budget.maxContextTokens / 2, 250);
+  const b = next.budget;
+  b.monthlyTokens = num(b.monthlyTokens, 100, 1e9, 2000);
+  b.perAnalysisTokens = num(b.perAnalysisTokens, 50, b.monthlyTokens, 400);
+  b.maxContextTokens = num(b.maxContextTokens, 150, b.perAnalysisTokens, 600);
+  b.maxOutputTokens = num(b.maxOutputTokens, 10, Math.floor(b.maxContextTokens / 2), 40);
+  b.maxCalls = num(b.maxCalls, 1, 50, 3);
+  b.maxRounds = num(b.maxRounds, 0, 3, 1);
+  b.docTokens = num(b.docTokens, 0, Math.floor(b.maxContextTokens / 3), 60);
   fs.mkdirSync(DATA, { recursive: true });
   fs.writeFileSync(FILE, JSON.stringify(next, null, 2), { mode: 0o600 });
   return next;

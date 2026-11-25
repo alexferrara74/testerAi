@@ -91,24 +91,28 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   }
 
   /* --- AI (opzionale, a budget) --- */
-  const aiInfo = { used: false, provider: cfg.ai.provider, model: cfg.ai.model, maxContextTokens: cfg.budget.maxContextTokens, calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, skipped: 0, errors: [], note: '' };
+  const aiInfo = { used: false, provider: cfg.ai.provider, model: cfg.ai.model, maxContextTokens: cfg.budget.maxContextTokens, monthlyLimit: cfg.budget.monthlyTokens, spent: 0, calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, skipped: 0, errors: [], note: '' };
   if (useAI && cfg.ai.enabled && cfg.ai.model) {
     onProgress('Triage AI (budget ' + cfg.budget.maxContextTokens + ' token/chiamata)');
+    // Risparmio token: le regole "certe" (chiavi, conflitti...) NON vanno all'AI. Solo i casi ambigui,
+    // poi le regressioni (simbolo+file), infine gli hunk rischiosi, finche' la quota lo permette.
+    const CERTAIN = new Set(['SEC-SECRET-PRIVKEY', 'SEC-SECRET-AWS', 'SEC-SECRET-TOKEN', 'ERR-CONFLICT', 'SEC-SENSITIVE-FILE']);
     const items = []; const byId = new Map(findings.map((f) => [f.id, f]));
+    const cut = (x, n) => String(x || '').trim().replace(/\s+/g, ' ').slice(0, n);
     for (const f of findings) {
-      if (SEV[f.severity] >= 3 && f.code && f.line) items.push({ id: f.id, priority: 100 + SEV[f.severity] * 10, text: `${f.id}|${f.file}:${f.line}|${f.code}` });
+      if (CERTAIN.has(f.rule) || SEV[f.severity] < 3) continue;
+      if (f.code && f.line) items.push({ id: f.id, priority: 200 + SEV[f.severity], text: `${f.id}|${path.basename(f.file)}:${f.line}|${cut(f.code, 90)}` });
+      else if (f.rule.startsWith('REG-')) items.push({ id: f.id, priority: 150, text: `${f.id}|${path.basename(f.file)}|${cut(f.message, 90)}` });
     }
-    // Hunk "rischiosi" non gia' coperti da una regola: solo le righe modificate, ritagliate.
     const flagged = new Set(findings.map((f) => f.file));
     let hid = 0;
     for (const [file, d] of diff) {
       if (ignored(cfg, file) || !R.isSourcePath(file)) continue;
       const score = (R.isRiskyPath(file) ? 30 : 0) + Math.min(20, d.hunks.reduce((s, h) => s + h.removed.length, 0)) + (flagged.has(file) ? 0 : 5);
-      if (score < 10) continue;
-      for (const h of d.hunks.slice(0, 3)) {
-        const code = [...h.removed.slice(0, 2).map((r) => '-' + r.t.trim()), ...h.added.slice(0, 3).map((a) => '+' + a.t.trim())].join(' ⏎ ').slice(0, 220);
-        if (code.length > 12) items.push({ id: 'H' + ++hid, priority: score, text: `H${hid}|${file}:${h.newStart}|${code}`, file, line: h.newStart, code });
-      }
+      if (score < 15) continue;
+      const h = d.hunks[0];
+      const code = [...h.removed.slice(0, 1).map((r) => '-' + r.t.trim()), ...h.added.slice(0, 2).map((x) => '+' + x.t.trim())].join(' ').slice(0, 100);
+      if (code.length > 12) items.push({ id: 'H' + ++hid, priority: score, text: `H${hid}|${path.basename(file)}:${h.newStart}|${code}`, file, line: h.newStart, code });
     }
     const kw = [...files.map((f) => path.basename(f.path).replace(/\.\w+$/, '')), ...commits.flatMap((c) => c.subject.split(/\W+/))];
     const docsText = retrieveDocs(docs, kw, cfg.budget.docTokens);
@@ -117,7 +121,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
       Object.assign(aiInfo, { used: true, ...r.usage, skipped: r.skipped, errors: r.errors });
       for (const [id, why] of r.bug) {
         const f = byId.get(id);
-        if (f) { f.ai = 'confermato'; f.aiNote = why; } else { const it = items.find((i) => i.id === id); if (it) add({ source: 'ai', rule: 'AI-REVIEW', category: 'error', severity: 'medium', file: it.file, line: it.line, message: why || 'Segnalato dall\'AI', code: it.code }); }
+        if (f) { f.ai = 'confermato'; f.aiNote = why; } else { const it = items.find((i) => i.id === id); if (it && it.file) add({ source: 'ai', rule: 'AI-REVIEW', category: 'error', severity: 'medium', file: it.file, line: it.line, message: 'Possibile problema segnalato dall\'AI (da verificare)', code: it.code }); }
       }
       for (const id of r.fp) { const f = byId.get(id); if (f) { f.ai = 'falso positivo'; f.severityOriginal = f.severity; f.severity = 'info'; } }
     } catch (e) { aiInfo.errors.push(e.message); }
@@ -139,7 +143,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     item('c8', 'Commit chiari e di dimensione ragionevole', has('GIT-MSG', 'GIT-BIG-COMMIT'), 'valutare squash/riscrittura messaggi'),
     { id: 'c9', title: `Branch aggiornato rispetto a ${base}`, status: behind ? 'warn' : 'pass', detail: behind ? `${behind} commit di ${base} non ancora integrati: rischio regressioni al merge` : 'allineato', checked: false },
     { id: 'c10', title: 'Working tree pulito (nessuna modifica non committata)', status: dirty.length ? 'warn' : 'pass', detail: dirty.length ? `${dirty.length} file non committati: non analizzati` : 'pulito', checked: false },
-    { id: 'c11', title: 'Revisione AI completata', status: aiInfo.used ? (aiInfo.skipped || aiInfo.errors.length ? 'warn' : 'pass') : 'manual', detail: aiInfo.used ? `${aiInfo.calls} chiamate, ${aiInfo.skipped} elementi non inviati per budget` : aiInfo.note, checked: false },
+    { id: 'c11', title: 'Revisione AI completata', status: aiInfo.used ? (aiInfo.skipped || aiInfo.errors.length ? 'warn' : 'pass') : 'manual', detail: aiInfo.used ? `${aiInfo.calls} chiamate, ${aiInfo.spent} token spesi, ${aiInfo.skipped} elementi non inviati per budget` : aiInfo.note, checked: false },
   ];
 
   const bySev = {}; for (const f of findings) bySev[f.severity] = (bySev[f.severity] || 0) + 1;
@@ -173,7 +177,7 @@ export function toMarkdown(r) {
   const L = [];
   L.push(`# Report analisi: ${r.branch} ← ${r.base}`, '', `- Repo: \`${r.repo}\``, `- Data: ${r.createdAt}`, `- Merge-base: \`${r.mergeBase.slice(0, 10)}\`${r.baseDetected ? ' (base dedotto automaticamente)' : ''}`,
     `- Commit: ${r.summary.commits} · File: ${r.summary.files} · +${r.summary.added}/-${r.summary.deleted}`, `- Segnalazioni: ${r.summary.findings} ${JSON.stringify(r.summary.bySeverity)}`,
-    `- AI: ${r.ai.used ? `${r.ai.calls} chiamate (${r.ai.cached} da cache), token stimati in/out ${r.ai.estIn}/${r.ai.estOut}, reali ${r.ai.in}/${r.ai.out}, non inviati ${r.ai.skipped}` : r.ai.note}`, '', '## Checklist');
+    `- AI: ${r.ai.used ? `${r.ai.calls} chiamate (${r.ai.cached} da cache), ${r.ai.spent} token spesi (quota mensile ${r.ai.monthlyUsedBefore + r.ai.spent}/${r.ai.monthlyLimit}), non inviati ${r.ai.skipped}` : r.ai.note}`, '', '## Checklist');
   for (const c of r.checklist) L.push(`- [${c.checked ? 'x' : ' '}] ${{ pass: '✅', warn: '⚠️', fail: '❌', manual: '👁️' }[c.status]} **${c.title}** — ${c.detail}`);
   L.push('', '## Modifiche rispetto a ' + r.base, '', '| Stato | File | + | - |', '|---|---|---|---|');
   for (const f of r.files) L.push(`| ${f.status} | ${f.oldPath ? f.oldPath + ' → ' : ''}${f.path} | ${f.add} | ${f.del} |`);

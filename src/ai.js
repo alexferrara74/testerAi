@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA } from './config.js';
 import { estimate, fit } from './tokens.js';
+import { remaining, record, readUsage } from './usage.js';
 
 /* ---------------- Provider layer ---------------- */
 export async function callModel(ai, system, user, maxOut) {
@@ -38,94 +39,81 @@ const loadCache = () => { if (!cache) { try { cache = JSON.parse(fs.readFileSync
 const saveCache = () => { try { fs.mkdirSync(path.dirname(CACHE), { recursive: true }); fs.writeFileSync(CACHE, JSON.stringify(cache)); } catch { /* best effort */ } };
 
 /* ---------------- Triage con budget rigido ---------------- */
-const SYSTEM = 'Code reviewer. Items: id|file:line|code. Find real bugs/vulns/regressions. Reply ONLY JSON: {"bug":[[id,"motivo max 12 parole IT"]],"fp":[ids that are harmless],"ask":[["file",fromLine,toLine]]}. Use ask only if context is essential. No prose.';
+const SYSTEM = 'Review items id|loc|code. JSON only: {"b":[ids with real bug/vuln],"f":[ids harmless],"a":[[file,from,to]] only if context is essential}';
 
 function parseReply(text) {
   const m = text.match(/\{[\s\S]*\}/);
-  if (!m) return { bug: [], fp: [], ask: [] };
+  const e = { bug: [], fp: [], ask: [] };
+  if (!m) return e;
   try {
     const j = JSON.parse(m[0]);
-    return { bug: Array.isArray(j.bug) ? j.bug : [], fp: Array.isArray(j.fp) ? j.fp : [], ask: Array.isArray(j.ask) ? j.ask : [] };
-  } catch { return { bug: [], fp: [], ask: [] }; }
-}
-
-/** Impacchetta gli item (gia' ordinati per priorita') in prompt che stanno dentro il budget di input. */
-export function pack(items, inputBudget) {
-  const batches = []; let cur = []; let used = 0;
-  for (const it of items) {
-    const c = estimate(it.text) + 2;
-    if (c > inputBudget) { it.text = fit(it.text, inputBudget - 2); }
-    if (used + c > inputBudget && cur.length) { batches.push(cur); cur = []; used = 0; }
-    cur.push(it); used += Math.min(c, inputBudget);
-  }
-  if (cur.length) batches.push(cur);
-  return batches;
+    const arr = (x) => (Array.isArray(x) ? x : []);
+    return { bug: arr(j.b ?? j.bug), fp: arr(j.f ?? j.fp), ask: arr(j.a ?? j.ask) };
+  } catch { return e; }
 }
 
 /**
- * items: [{id, text, priority}]; ctx.snippet(file,from,to) -> Promise<string[]>
- * Ritorna {bug:Map(id->motivo), fp:Set(id), usage, skipped, errors}
+ * Il vero limite e' MENSILE (budget.monthlyTokens, contatore persistente in usage.json) e per singola
+ * analisi (perAnalysisTokens). Ogni chiamata viene dimensionata sul residuo; se non c'e' spazio non parte.
+ * Le risposte in cache non consumano nulla.
  */
 export async function triage(cfg, items, docsText, ctx) {
   const { ai, budget } = cfg;
-  const usage = { calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0 };
-  const res = { bug: new Map(), fp: new Set(), usage, skipped: 0, errors: [] };
+  const usage = { calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, spent: 0, monthlyLimit: budget.monthlyTokens, monthlyUsedBefore: readUsage().used };
+  const res = { bug: new Map(), fp: new Set(), usage, skipped: items.length, errors: [] };
   const sysTokens = estimate(SYSTEM);
+  const left = () => Math.min(budget.perAnalysisTokens - usage.spent, remaining(budget.monthlyTokens));
   const docs = docsText ? fit(`DOCS:\n${docsText}\n`, budget.docTokens) : '';
-  const inputBudget = budget.maxContextTokens - budget.maxOutputTokens - sysTokens - estimate(docs) - 20; // margine
-  if (inputBudget < 100) { res.errors.push('Budget troppo piccolo: aumenta maxContextTokens o riduci docTokens/maxOutputTokens'); res.skipped = items.length; return res; }
+  const room = () => Math.min(budget.maxContextTokens, left()) - budget.maxOutputTokens - sysTokens - estimate(docs) - 8;
+  if (room() < 40) { res.errors.push(`Quota token esaurita o troppo bassa (residuo mese: ${remaining(budget.monthlyTokens)}, analisi: ${budget.perAnalysisTokens - usage.spent})`); return res; }
 
-  const sorted = [...items].sort((a, b) => b.priority - a.priority);
-  const batches = pack(sorted, inputBudget);
+  const queue = [...items].sort((a, b) => b.priority - a.priority);
+  const sent = new Set();
 
-  const ask = async (user) => {
+  const ask = async (user, note) => {
     const key = crypto.createHash('sha1').update(`${ai.provider}|${ai.model}|${user}`).digest('hex');
     const c = loadCache();
     if (budget.cache && c[key]) { usage.cached++; return c[key]; }
     if (usage.calls >= budget.maxCalls) return null;
-    // Guardia finale: mai oltre il limite aziendale
-    if (sysTokens + estimate(user) + budget.maxOutputTokens > budget.maxContextTokens) { user = fit(user, budget.maxContextTokens - budget.maxOutputTokens - sysTokens - 5); }
+    const cost = sysTokens + estimate(user) + budget.maxOutputTokens;
+    if (cost > left()) return null; // mai superare la quota
     usage.calls++; usage.estIn += sysTokens + estimate(user);
     const r = await callModel(ai, SYSTEM, user, budget.maxOutputTokens);
-    usage.estOut += estimate(r.text); usage.in += r.tin || 0; usage.out += r.tout || 0;
+    const real = (r.tin || 0) + (r.tout || 0);
+    const spent = real || (sysTokens + estimate(user) + estimate(r.text));
+    usage.spent += spent; usage.estOut += estimate(r.text); usage.in += r.tin || 0; usage.out += r.tout || 0;
+    record(spent, note);
     const parsed = parseReply(r.text);
     if (budget.cache) { c[key] = parsed; saveCache(); }
     return parsed;
   };
+  const apply = (p) => { for (const b of p.bug) res.bug.set(String(Array.isArray(b) ? b[0] : b), ''); for (const f of p.fp) res.fp.add(String(f)); };
 
-  const apply = (p) => {
-    for (const b of p.bug) { if (Array.isArray(b)) res.bug.set(String(b[0]), String(b[1] || '')); else res.bug.set(String(b), ''); }
-    for (const f of p.fp) res.fp.add(String(f));
-  };
-
-  let done = 0;
-  for (const batch of batches) {
-    if (usage.calls >= budget.maxCalls) break;
+  while (queue.length && usage.calls < budget.maxCalls && room() >= 40) {
+    const r = room(); const batch = []; let used = 0;
+    while (queue.length) {
+      const it = queue[0]; const c = estimate(it.text) + 2;
+      if (used + c > r) { if (!batch.length) { it.text = fit(it.text, r - 2); continue; } break; }
+      batch.push(queue.shift()); used += c;
+    }
     try {
-      const user = docs + batch.map((i) => i.text).join('\n');
-      const p = await ask(user);
-      if (!p) break;
-      apply(p);
-      done += batch.length;
-      // Il modello chiede contesto: lo forniamo ritagliato, senza reinviare tutto il batch.
+      const p = await ask(docs + batch.map((i) => i.text).join('\n'), 'triage');
+      if (!p) { queue.unshift(...batch); break; }
+      apply(p); batch.forEach((i) => sent.add(i.id));
       let asks = p.ask;
-      for (let round = 0; round < budget.maxRounds && asks.length && usage.calls < budget.maxCalls; round++) {
-        const room = Math.floor((inputBudget - 40) / Math.min(asks.length, 2));
-        const parts = [];
-        for (const a of asks.slice(0, 2)) {
-          const [file, from, to] = a; const f = Number(from) || 1, t = Math.min(Number(to) || f + 20, f + 40);
-          const lines = await ctx.snippet(String(file), f, t);
-          if (lines.length) parts.push(fit(`CTX ${file}\n${lines.join('\n')}`, room));
-        }
-        if (!parts.length) break;
-        const ids = batch.filter((i) => !res.bug.has(i.id) && !res.fp.has(i.id)).map((i) => i.text);
-        const follow = parts.join('\n') + '\nRe-evaluate:\n' + fit(ids.join('\n'), Math.max(40, inputBudget - estimate(parts.join('\n')) - 10));
-        const p2 = await ask(follow);
+      for (let round = 0; round < budget.maxRounds && asks.length && usage.calls < budget.maxCalls && room() >= 60; round++) {
+        const [file, from, to] = asks[0];
+        const f = Number(from) || 1, t = Math.min(Number(to) || f + 12, f + 20);
+        const lines = await ctx.snippet(String(file), f, t);
+        if (!lines.length) break;
+        const ctxTxt = fit(`CTX ${file}\n${lines.join('\n')}`, Math.floor(room() * 0.6));
+        const pending = batch.filter((i) => !res.bug.has(i.id) && !res.fp.has(i.id)).map((i) => i.text).join('\n');
+        const p2 = await ask(ctxTxt + '\n' + fit(pending, room() - estimate(ctxTxt) - 4), 'ask');
         if (!p2) break;
         apply(p2); asks = p2.ask;
       }
     } catch (e) { res.errors.push(e.message); break; }
   }
-  res.skipped = items.length - done;
+  res.skipped = items.length - sent.size;
   return res;
 }

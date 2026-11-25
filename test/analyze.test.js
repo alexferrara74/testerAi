@@ -34,22 +34,29 @@ test('analisi statica: modifiche, segreti, regressioni, checklist', async () => 
   assert.match(toMarkdown(r), /Checklist/);
 });
 
-test('AI: rispetta il budget di 2000 token e usa la cache', async () => {
+test('AI: quota mensile 2000 mai superata, cache e stop a quota esaurita', async () => {
   const seen = [];
   const srv = http.createServer((req, res) => {
     let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
-      const j = JSON.parse(b); seen.push(j);
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ choices: [{ message: { content: '{"bug":[["F1","segreto reale"]],"fp":[],"ask":[]}' } }], usage: { prompt_tokens: 100, completion_tokens: 10 } }));
+      seen.push(JSON.parse(b)); res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content: '{"b":["F1"],"f":[],"a":[]}' } }], usage: { prompt_tokens: 150, completion_tokens: 10 } }));
     });
   }).listen(0);
-  const port = srv.address().port;
-  saveConfig({ ai: { enabled: true, baseUrl: `http://127.0.0.1:${port}/v1`, model: 'm', apiKey: 'k' }, budget: { maxContextTokens: 2000 } });
-  const r = await analyze({ repo, branch: 'feature/x', useAI: true, docs: [{ name: 'rules', text: 'Vietato usare eval in util.\n\nAltro testo irrilevante qui.' }] });
+  saveConfig({ ai: { enabled: true, baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, model: 'm', apiKey: 'k' } });
+  const { readUsage } = await import('../src/usage.js');
+  const docs = [{ name: 'rules', text: 'Vietato usare eval in util.\n\nAltro testo irrilevante qui.' }];
+  const r = await analyze({ repo, branch: 'feature/x', useAI: true, docs });
   assert.ok(r.ai.used && r.ai.calls >= 1, JSON.stringify(r.ai));
-  for (const j of seen) assert.ok(estimate(j.messages.map((m) => m.content).join('')) + j.max_tokens <= 2000);
-  const n = seen.length;
-  await analyze({ repo, branch: 'feature/x', useAI: true, docs: [{ name: 'rules', text: 'Vietato usare eval in util.\n\nAltro testo irrilevante qui.' }] });
-  assert.equal(seen.length, n, 'seconda esecuzione servita dalla cache');
+  assert.ok(r.ai.spent <= 400, 'tetto per analisi');
+  assert.ok(readUsage().used <= 2000);
+  for (const j of seen) assert.ok(j.max_tokens <= 40 && estimate(j.messages.map((m) => m.content).join('')) <= 600);
+  const n = seen.length, used = readUsage().used;
+  await analyze({ repo, branch: 'feature/x', useAI: true, docs });
+  assert.equal(seen.length, n, 'cache: nessuna nuova chiamata'); assert.equal(readUsage().used, used);
+  // quota mensile quasi esaurita -> nessuna chiamata
+  fs.writeFileSync(path.join(process.env.TESTERAI_DATA, 'usage.json'), JSON.stringify({ month: new Date().toISOString().slice(0, 7), used: 1990, calls: 9, log: [] }));
+  saveConfig({ budget: { cache: false } });
+  const r3 = await analyze({ repo, branch: 'feature/x', useAI: true });
+  assert.equal(seen.length, n); assert.ok(r3.ai.errors.length, 'segnala quota esaurita');
   srv.close();
 });

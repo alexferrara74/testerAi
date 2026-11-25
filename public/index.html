@@ -21,7 +21,7 @@ code,.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}.A{color:var(
 .dir{padding:5px 8px;cursor:pointer;border-radius:4px}.dir:hover{background:var(--bg)}.hide{display:none}details{margin:2px 0}summary{cursor:pointer}
 .chk{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--bd)}.pass{color:var(--ok)}.warn{color:var(--med)}.fail{color:var(--crit)}
 </style></head><body>
-<header><h1>🔎 testerAi</h1><nav id="nav"><button data-t="an" class="on">Analisi</button><button data-t="rep">Report</button><button data-t="cfg">Configurazione AI</button></nav></header>
+<header><h1>🔎 testerAi</h1><span id="q" class="hint"></span><nav id="nav"><button data-t="an" class="on">Analisi</button><button data-t="rep">Report</button><button data-t="cfg">Configurazione AI</button></nav></header>
 <main>
 <section id="t-an">
  <div class="card">
@@ -51,9 +51,9 @@ code,.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}.A{color:var(
   <label>Header extra (JSON)</label><input id="c_extraHeaders" placeholder='{"X-Team":"abc"}'>
   <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="c_enabled" style="width:auto"> AI abilitata</label>
  </div>
- <div class="card"><b>Budget token</b> <span class="hint">limite aziendale per singola chiamata</span>
+ <div class="card"><b>Budget token</b> <span class="hint">quota MENSILE aziendale + limiti per analisi/chiamata</span><div id="quota" class="hint" style="margin:6px 0"></div>
   <div class="row">
-   <div><label>Contesto max (input+output)</label><input id="b_maxContextTokens" type="number"></div><div><label>Output max</label><input id="b_maxOutputTokens" type="number"></div>
+   <div><label>Quota mensile totale</label><input id="b_monthlyTokens" type="number"></div><div><label>Max per singola analisi</label><input id="b_perAnalysisTokens" type="number"></div><div><label>Max per chiamata</label><input id="b_maxContextTokens" type="number"></div><div><label>Output max</label><input id="b_maxOutputTokens" type="number"></div>
    <div><label>Chiamate max per analisi</label><input id="b_maxCalls" type="number"></div><div><label>Round di domande/batch</label><input id="b_maxRounds" type="number"></div>
    <div><label>Token riservati ai documenti</label><input id="b_docTokens" type="number"></div>
   </div>

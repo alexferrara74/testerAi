@@ -43,7 +43,7 @@ $('run').onclick = async () => {
       await new Promise((r) => setTimeout(r, 600));
       const j = await api('/api/jobs/' + job); $('prog').textContent = j.progress;
       if (j.status === 'error') throw new Error(j.error);
-      if (j.status === 'done') { document.querySelector('[data-t=rep]').click(); showReport(j.reportId); break; }
+      if (j.status === 'done') { quota(); document.querySelector('[data-t=rep]').click(); showReport(j.reportId); break; }
     }
   } catch (e) { $('prog').textContent = '❌ ' + e.message; } finally { $('run').disabled = false; }
 };
@@ -64,7 +64,7 @@ async function showReport(id) {
    <a class="s" style="float:right" href="/api/reports/${id}.md" download="report-${id}.md">⬇ Markdown</a>
    <p><span class="stat"><b>${s.commits}</b>commit</span><span class="stat"><b>${s.files}</b>file</span><span class="stat"><b class="add">+${s.added}</b>righe</span><span class="stat"><b class="del">-${s.deleted}</b>righe</span>
    <span class="stat"><b>${s.findings}</b>segnalazioni</span> ${['critical', 'high', 'medium', 'low', 'info'].map((k) => sev(k) ? `<span class="tag ${k}">${k} ${sev(k)}</span> ` : '').join('')}</p>
-   <div class="hint">AI: ${r.ai.used ? `${r.ai.calls} chiamate (${r.ai.cached} da cache) · token stimati in/out ${r.ai.estIn}/${r.ai.estOut}${r.ai.in ? ` · reali ${r.ai.in}/${r.ai.out}` : ''} · ${r.ai.skipped} elementi non inviati per budget ${r.ai.errors.length ? '· ⚠ ' + esc(r.ai.errors.join('; ')) : ''}` : esc(r.ai.note)} · limite ${r.ai.maxContextTokens} token/chiamata</div></div>
+   <div class="hint">AI: ${r.ai.used ? `${r.ai.calls} chiamate (${r.ai.cached} da cache) · ${r.ai.spent} token spesi (mese ${r.ai.monthlyUsedBefore + r.ai.spent}/${r.ai.monthlyLimit}) · ${r.ai.skipped} elementi non inviati per budget ${r.ai.errors.length ? '· ⚠ ' + esc(r.ai.errors.join('; ')) : ''}` : esc(r.ai.note)}</div></div>
   <div class="card"><b>✅ Checklist</b>${r.checklist.map((c) => `<div class="chk"><input type="checkbox" style="width:auto" data-c="${c.id}" ${c.checked ? 'checked' : ''}><div><span class="${c.status}">${ICON[c.status]}</span> ${esc(c.title)}<div class="hint">${esc(c.detail)}</div></div></div>`).join('')}</div>
   <div class="card"><b>Modifiche rispetto a ${esc(r.base)}</b> <span class="hint">(${Object.entries(s.byStatus).map(([k, v]) => k + ':' + v).join(' ')})</span>
    ${r.files.map((f) => `<details><summary><span class="${f.status} mono">${f.status}</span> <code>${f.oldPath ? esc(f.oldPath) + ' → ' : ''}${esc(f.path)}</code> <span class="add">+${f.add}</span> <span class="del">-${f.del}</span></summary>
@@ -75,8 +75,11 @@ async function showReport(id) {
 }
 
 /* --- config --- */
-const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'timeoutMs'], BF = ['maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
+const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'timeoutMs'], BF = ['monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
+async function quota() { try { const u = await api('/api/usage'); const t = `Token AI ${u.month}: ${u.used}/${u.limit} (residui ${u.remaining})`; $('q').textContent = t; if ($('quota')) $('quota').textContent = t; } catch {} }
+quota();
 async function loadCfg() {
+  quota();
   const c = await api('/api/config');
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled;
   BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;

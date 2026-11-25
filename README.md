@@ -13,12 +13,16 @@ npm test
 3. **Report**: riepilogo, checklist (con spunte salvate), ogni file modificato con righe +/- rispetto alla base, commit, segnalazioni per categoria; export Markdown.
 4. **Configurazione AI**: provider (OpenAI-compatibile = Copilot/Azure/gateway aziendale, Anthropic, Ollama), URL, modello, key, header auth/extra, api-version e budget token. Test connessione incluso. La key può essere passata via `TESTERAI_API_KEY`.
 
-## Come consuma pochi token (limite 2k/chiamata)
-- **Livello 0 (0 token)**: regole statiche sulle sole righe aggiunte (segreti, injection, XSS, TLS, eval, conflitti, test `.only`…), simboli rimossi/cambiati ancora referenziati (`git grep`), test non toccati, lockfile, commit, branch indietro, working tree sporco.
-- **Livello 1 (AI)**: all'AI vanno solo le segnalazioni medium+ e gli hunk rischiosi, in forma compatta `id|file:riga|codice`, ordinati per priorità e impacchettati in batch che stanno nel budget (`contesto − output − system − documenti`). Risposta forzata in JSON minimo (`bug`/`fp`/`ask`).
-- **Domande**: il modello può chiedere `ask:[file,da,a]`; il tool risponde con uno snippet (max 40 righe, tagliato al budget) invece di inviare file interi.
-- **Documenti**: ranking per parole chiave (nomi file/commit), si inviano solo i paragrafi pertinenti entro `docTokens`.
-- **Cache** su disco delle risposte (re-run identico = 0 token), tetto `maxCalls`, guardia che tronca ogni prompt oltre il limite. Il report mostra token stimati/reali, chiamate e elementi non inviati.
+## Budget token: 2000 al MESE
+Il limite è un **contatore mensile persistente** (`data/usage.json`, si azzera a inizio mese) mostrato in alto nel FE. Ogni chiamata viene dimensionata sul residuo e **non parte** se non ci sta; i token contati sono quelli reali del provider (stima se assenti).
+- Default: mese 2000 · per analisi 400 · per chiamata 600 · output 40 · max 3 chiamate · documenti 60 (tutto modificabile da FE).
+- **La parte pesante è a 0 token**: regole statiche, simboli rimossi/cambiati, diff, checklist, report. L'AI è solo un filtro finale.
+- All'AI **non** vanno i casi certi (chiavi, conflitti, file `.env`): solo ambigui (SQL concat, XSS, exec…), regressioni e pochi hunk rischiosi, come `id|file:riga|codice` (≤90 caratteri).
+- Prompt di sistema ~40 token; risposta forzata a `{"b":[ids],"f":[ids],"a":[[file,da,a]]}` (solo id, niente motivazioni).
+- **Domande**: il modello può chiedere un contesto (`a`): riceve max 20 righe e solo se la quota residua lo consente.
+- **Documenti**: si inviano solo i paragrafi pertinenti, entro `docTokens`.
+- **Cache** su disco: stessa richiesta = 0 token. Il test di connessione costa ~15 token e viene contato.
+- Disattiva "Usa AI" per un'analisi completamente gratuita.
 
 ## Sicurezza
 Ascolta solo su 127.0.0.1, controllo Origin sulle API, `execFile` senza shell, ref git validati. La config è in `data/config.json` (0600, ignorata da git).
