@@ -4,8 +4,32 @@ import path from 'node:path';
 import { DATA } from './config.js';
 import { estimate, fit } from './tokens.js';
 import { remaining, record, readUsage } from './usage.js';
+import os from 'node:os';
 import { guardedFetch, redact } from './privacy.js';
 import { loadConfig } from './config.js';
+
+/* ---------------- GitHub Copilot: scambio token ---------------- */
+// Il token GitHub (OAuth del tuo login Copilot) si scambia con un token Copilot di breve durata.
+// NB: l'endpoint di scambio e' quello usato dai plugin ufficiali ma non e' documentato come API pubblica.
+export function readLocalCopilotToken() {
+  const dirs = [path.join(os.homedir(), '.config', 'github-copilot'), process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'github-copilot')].filter(Boolean);
+  for (const d of dirs) for (const f of ['apps.json', 'hosts.json']) {
+    try { const j = JSON.parse(fs.readFileSync(path.join(d, f), 'utf8')); for (const v of Object.values(j)) if (v?.oauth_token) return v.oauth_token; } catch { /* prossimo */ }
+  }
+  return '';
+}
+const ctok = new Map();
+async function copilotToken(ai) {
+  const oauth = ai.apiKey || (ai.copilotAutoToken ? readLocalCopilotToken() : '');
+  if (!oauth) throw new Error('Copilot: manca il token GitHub (incollalo nel campo API key oppure abilita la lettura del login Copilot locale)');
+  const hit = ctok.get(oauth); if (hit && hit.exp - 60e3 > Date.now()) return hit.token;
+  const res = await guardedFetch(ai.copilotTokenUrl, { method: 'GET', headers: { authorization: `token ${oauth}`, accept: 'application/json', 'user-agent': 'GitHubCopilotChat/0.22.0', 'editor-version': 'vscode/1.95.0' }, signal: AbortSignal.timeout(ai.timeoutMs || 60000) }, 'ai-token');
+  const raw = await res.text();
+  if (!res.ok) throw new Error(`Copilot token ${res.status}: verifica che l'account abbia una licenza Copilot attiva (${raw.slice(0, 120)})`);
+  const j = JSON.parse(raw); if (!j.token) throw new Error('Copilot: risposta senza token');
+  ctok.set(oauth, { token: j.token, exp: (j.expires_at || 0) * 1000 || Date.now() + 20 * 60e3 });
+  return j.token;
+}
 
 /* ---------------- Provider layer ---------------- */
 export async function callModel(ai, system, user, maxOut) {
@@ -20,6 +44,10 @@ export async function callModel(ai, system, user, maxOut) {
   } else if (ai.provider === 'ollama') {
     url = `${base}/api/chat`;
     body = { model: ai.model, stream: false, options: { temperature: ai.temperature, num_predict: maxOut }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
+  } else if (ai.provider === 'copilot') {
+    url = `${base}/chat/completions`;
+    Object.assign(headers, { authorization: `Bearer ${await copilotToken(ai)}`, 'editor-version': 'vscode/1.95.0', 'editor-plugin-version': 'copilot-chat/0.22.0', 'copilot-integration-id': 'vscode-chat', 'user-agent': 'GitHubCopilotChat/0.22.0' });
+    body = { model: ai.model, max_tokens: maxOut, temperature: ai.temperature, stream: false, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
   } else {
     url = `${base}/chat/completions${ai.apiVersion ? `?api-version=${encodeURIComponent(ai.apiVersion)}` : ''}`;
     if (ai.apiKey) headers[ai.authHeader || 'Authorization'] = ai.authScheme ? `${ai.authScheme} ${ai.apiKey}` : ai.apiKey;

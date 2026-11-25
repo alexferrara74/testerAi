@@ -18,6 +18,8 @@ export const DEFAULTS = {
     authHeader: 'Authorization', // es. "api-key" per Azure
     authScheme: 'Bearer',        // vuoto = solo chiave
     extraHeaders: {},
+    copilotTokenUrl: 'https://api.github.com/copilot_internal/v2/token', // solo provider copilot (GHE: tuo host)
+    copilotAutoToken: false,     // legge il login Copilot gia' presente sul PC (~/.config/github-copilot)
     apiVersion: '',              // Azure: ?api-version=
     temperature: 0,
     timeoutMs: 60000,
@@ -67,8 +69,9 @@ export function saveConfig(patch) {
   const cur = loadConfig();
   if (patch.ai && patch.ai.apiKey === '********') delete patch.ai.apiKey; // il FE non ritrasmette il segreto
   const next = merge(cur, patch);
-  next.ai.provider = ['openai', 'anthropic', 'ollama'].includes(next.ai.provider) ? next.ai.provider : 'openai';
+  next.ai.provider = ['openai', 'anthropic', 'ollama', 'copilot'].includes(next.ai.provider) ? next.ai.provider : 'openai';
   if (typeof next.ai.extraHeaders === 'string') { try { next.ai.extraHeaders = JSON.parse(next.ai.extraHeaders || '{}'); } catch { throw new Error('extraHeaders non e\' JSON valido'); } }
+  next.ai.copilotAutoToken = !!next.ai.copilotAutoToken;
   for (const k of ['offline', 'sendCode', 'redactSecrets', 'allowHttp']) next.privacy[k] = !!next.privacy[k];
   next.analysis.cve.cacheHours = num(next.analysis.cve.cacheHours, 0, 720, 24);
   next.analysis.cve.timeoutMs = num(next.analysis.cve.timeoutMs, 1000, 60000, 10000);

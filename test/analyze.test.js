@@ -173,3 +173,21 @@ test('privacy: uscite solo verso AI configurata, segreti oscurati, offline e sen
   saveConfig({ privacy: { offline: false, sendCode: true } });
   srv.close();
 });
+
+test('provider GitHub Copilot: scambio token poi chat, solo host configurati', async () => {
+  const calls = [];
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
+    calls.push({ url: req.url, auth: req.headers.authorization, integ: req.headers['copilot-integration-id'] }); res.setHeader('content-type', 'application/json');
+    if (req.url === '/copilot_internal/v2/token') return res.end(JSON.stringify({ token: 'tid=copilot-short', expires_at: Math.floor(Date.now() / 1000) + 1500 }));
+    res.end(JSON.stringify({ choices: [{ message: { content: '{"b":[],"f":[],"a":[]}' } }], usage: { prompt_tokens: 30, completion_tokens: 4 } })); }); }).listen(0);
+  const root = `http://127.0.0.1:${srv.address().port}`;
+  const { callModel } = await import('../src/ai.js'); const { loadConfig } = await import('../src/config.js');
+  saveConfig({ ai: { enabled: true, provider: 'copilot', baseUrl: root, copilotTokenUrl: root + '/copilot_internal/v2/token', model: 'gpt-4o', apiKey: 'ghu_oauth' } });
+  const ai = loadConfig().ai; assert.equal(ai.provider, 'copilot');
+  const r = await callModel(ai, 'sys', 'hi', 20); await callModel(ai, 'sys', 'hi', 20);
+  assert.equal(r.tin, 30);
+  assert.equal(calls[0].auth, 'token ghu_oauth'); assert.equal(calls[1].url, '/chat/completions');
+  assert.equal(calls[1].auth, 'Bearer tid=copilot-short'); assert.equal(calls[1].integ, 'vscode-chat');
+  assert.equal(calls.filter((c) => c.url.includes('v2/token')).length, 1, 'token Copilot messo in cache');
+  srv.close();
+});

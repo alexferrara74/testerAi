@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig, publicConfig, ROOT } from './config.js';
 import * as G from './git.js';
 import { analyze, listReports, getReport, setChecked, setReviewState, toMarkdown } from './analyzer.js';
-import { callModel } from './ai.js';
+import { callModel, readLocalCopilotToken } from './ai.js';
 import { readUsage, setUsed } from './usage.js';
 import { allowedDestinations, readEgressLog } from './privacy.js';
 
@@ -54,6 +54,7 @@ export function createServer() {
       if (req.method === 'PUT' && u.pathname === '/api/usage') setUsed((await readBody(req)).used);
       if ((req.method === 'GET' || req.method === 'PUT') && u.pathname === '/api/usage') { const u2 = readUsage(), lim = loadConfig().budget.monthlyTokens; return send(res, 200, { month: u2.month, used: u2.used, limit: lim, remaining: Math.max(0, lim - u2.used), calls: u2.calls }); }
       if (req.method === 'GET' && u.pathname === '/api/privacy') return send(res, 200, { ...allowedDestinations(), dataDir: (await import('./config.js')).DATA, log: readEgressLog(50) });
+      if (req.method === 'GET' && u.pathname === '/api/copilot/detect') return send(res, 200, { found: !!readLocalCopilotToken() }); // mai il token
       if (u.pathname === '/api/config') {
         if (req.method === 'GET') return send(res, 200, publicConfig());
         if (req.method === 'PUT') return send(res, 200, publicConfig(saveConfig(await readBody(req))));

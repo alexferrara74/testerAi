@@ -13,6 +13,12 @@ npm test
 3. **Report**: riepilogo, checklist (con spunte salvate), ogni file modificato con righe +/- rispetto alla base, commit, segnalazioni per categoria; export Markdown.
 4. **Configurazione AI**: provider (OpenAI-compatibile = Copilot/Azure/gateway aziendale, Anthropic, Ollama), URL, modello, key, header auth/extra, api-version e budget token. Test connessione incluso. La key può essere passata via `TESTERAI_API_KEY`.
 
+## Collegare l'AI (Configurazione → Preset rapido)
+- **GitHub Copilot**: provider `copilot`. Scambia il tuo token GitHub (OAuth del login Copilot, `ghu_…`) con un token Copilot di breve durata (in cache) e chiama `api.githubcopilot.com` (Business/Enterprise: `api.business.` / `api.enterprise.githubcopilot.com`). Puoi incollare il token o spuntare «usa il login già presente», che legge `~/.config/github-copilot/` sul tuo PC (il token non passa mai dal browser). Integrazione non ufficiale: verifica che policy e ToS aziendali la consentano.
+- **GitHub Models** (ufficiale): preset OpenAI-compatibile con un PAT con permesso `models:read`.
+- Azure OpenAI, OpenAI, Anthropic Claude, Ollama/locale, qualsiasi gateway OpenAI-compatibile.
+- Il guard di rete consente solo gli host del provider scelto (per Copilot anche l'host di scambio token, che riceve solo il token GitHub).
+
 ## Budget token: 2000 al MESE
 Il limite è un **contatore mensile persistente** (`~/.testerai/usage.json`, si azzera a inizio mese) mostrato in alto nel FE. Ogni chiamata viene dimensionata sul residuo e **non parte** se non ci sta; i token contati sono quelli reali del provider (stima se assenti).
 - Default: mese 2000 · per analisi 400 · per chiamata 600 · output 40 · max 3 chiamate · documenti 60 (tutto modificabile da FE, incluso il consumo del mese: aggiorna o azzera).

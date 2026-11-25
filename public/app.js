@@ -235,17 +235,27 @@ function item(i) {
 }
 
 /* ---------- config ---------- */
+const PRESETS = {
+  copilot: { v: { provider: 'copilot', baseUrl: 'https://api.githubcopilot.com', model: 'gpt-4o', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: 'Serve una licenza GitHub Copilot. Incolla il token GitHub (OAuth del login Copilot, es. ghu_…) nel campo API key, oppure spunta «usa il login già presente». Copilot Business/Enterprise: cambia Base URL in https://api.business.githubcopilot.com o https://api.enterprise.githubcopilot.com. Integrazione non-ufficiale: verifica che le policy aziendali/ToS la consentano.' },
+  ghmodels: { v: { provider: 'openai', baseUrl: 'https://models.github.ai/inference', model: 'openai/gpt-4.1-mini', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: 'API ufficiale GitHub Models: API key = Personal Access Token con permesso models:read.' },
+  azure: { v: { provider: 'openai', baseUrl: 'https://<risorsa>.openai.azure.com/openai/deployments/<deployment>', model: '<deployment>', authHeader: 'api-key', authScheme: '', apiVersion: '2024-10-21' }, h: 'Sostituisci <risorsa> e <deployment>.' },
+  openai: { v: { provider: 'openai', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: '' },
+  anthropic: { v: { provider: 'anthropic', baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-4-5', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: 'API key Anthropic nel campo API key.' },
+  ollama: { v: { provider: 'ollama', baseUrl: 'http://127.0.0.1:11434', model: 'qwen2.5-coder', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: 'Modello locale: nessun dato lascia il PC.' },
+};
+$('c_preset').onchange = () => { const p = PRESETS[$('c_preset').value]; if (!p) return; for (const [k, v] of Object.entries(p.v)) $('c_' + k).value = v; $('c_presetHint').textContent = p.h; $('c_enabled').checked = true; };
+fetch('/api/copilot/detect').then((r) => r.json()).then((d) => { $('c_autoHint').textContent = d.found ? '(login Copilot trovato)' : '(nessun login Copilot trovato su questo PC)'; }).catch(() => {});
 const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'timeoutMs'], BF = ['monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
 async function loadCfg() {
   quota(); privacy(); const c = await api('/api/config');
   $('p_offline').checked = c.privacy.offline; $('p_sendCode').checked = c.privacy.sendCode; $('p_redact').checked = c.privacy.redactSecrets; $('p_http').checked = c.privacy.allowHttp;
-  AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled;
+  AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled; $('c_auto').checked = c.ai.copilotAutoToken;
   BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;
   $('a_maxCommits').value = c.analysis.maxCommits; $('a_maxReview').value = c.analysis.maxReviewItems; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours;
 }
 $('save').onclick = async () => {
   try {
-    const ai = { enabled: $('c_enabled').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value); ai.timeoutMs = +ai.timeoutMs || 60000;
+    const ai = { enabled: $('c_enabled').checked, copilotAutoToken: $('c_auto').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value); ai.timeoutMs = +ai.timeoutMs || 60000;
     const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = +$('b_' + k).value);
     await post('/api/config', { ai, budget, privacy: { offline: $('p_offline').checked, sendCode: $('p_sendCode').checked, redactSecrets: $('p_redact').checked, allowHttp: $('p_http').checked }, analysis: { maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
     $('cmsg').textContent = 'Valori incoerenti riportati nei limiti: mese ≥ analisi ≥ chiamata'; toast('✔ Configurazione salvata'); loadCfg(); privacy();
