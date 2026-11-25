@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig, publicConfig, ROOT } from './config.js';
 import * as G from './git.js';
-import { analyze, listReports, getReport, setChecked, toMarkdown } from './analyzer.js';
+import { analyze, listReports, getReport, setChecked, setReviewState, toMarkdown } from './analyzer.js';
 import { callModel } from './ai.js';
 import { readUsage, setUsed } from './usage.js';
 
@@ -83,6 +83,10 @@ export function createServer() {
       if ((m = u.pathname.match(/^\/api\/reports\/([\w-]+)\/check$/)) && req.method === 'POST') {
         const b = await readBody(req);
         return send(res, 200, setChecked(m[1], b.item, b.checked));
+      }
+      if ((m = u.pathname.match(/^\/api\/reports\/([\w-]+)\/review$/)) && req.method === 'POST') {
+        const b = await readBody(req);
+        return send(res, 200, setReviewState(m[1], Array.isArray(b.keys) ? b.keys.map(String) : [], b.state, b.note));
       }
       if (u.pathname.startsWith('/api/')) return send(res, 404, { error: 'not found' });
 

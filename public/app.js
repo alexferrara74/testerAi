@@ -96,13 +96,13 @@ function score(s) {
 }
 
 /* ---------- report ---------- */
-let R = null, tab = 'ov', selFile = null, fSev = 'all', fCat = 'all', fQ = '', fSt = 'all', fFQ = '';
+let R = null, tab = 'rv', rvF = 'todo', rvQ = '', rvOpen = {}, tab0 = 1, selFile = null, fSev = 'all', fCat = 'all', fQ = '', fSt = 'all', fFQ = '';
 const CATS = { security: '🔒 Sicurezza', error: '🐞 Errori', regression: '↩ Regressioni', quality: '🧹 Qualità' };
 const ICON = { pass: '✔', warn: '!', fail: '✕', manual: '👁' };
-async function showReport(id) { R = await api('/api/reports/' + id); tab = 'ov'; selFile = null; fSev = fCat = fSt = 'all'; fQ = fFQ = ''; $('repList').innerHTML = ''; drawReport(); }
+async function showReport(id) { R = await api('/api/reports/' + id); tab = 'rv'; selFile = null; rvF = 'todo'; rvQ = ''; rvOpen = {}; fSev = fCat = fSt = 'all'; fQ = fFQ = ''; $('repList').innerHTML = ''; drawReport(); }
 function drawReport() {
   const r = R, s = r.summary, sc = score(s), done = r.checklist.filter((c) => c.checked).length;
-  const tabs = [['ov', 'Panoramica'], ['fl', 'Modifiche', s.files], ['cm', 'Commit', s.commits], ['fd', 'Segnalazioni', s.findings], ['dp', 'Dipendenze', (r.deps || []).length], ['ck', 'Checklist', `${done}/${r.checklist.length}`]];
+  const rs = r.review?.stats || { total: 0, toDecide: 0 }; const tabs = [['rv', 'Revisione', `${rs.total - rs.toDecide}/${rs.total}`], ['ov', 'Panoramica'], ['fl', 'Modifiche', s.files], ['cm', 'Commit', s.commits], ['fd', 'Segnalazioni', s.findings], ['dp', 'Dipendenze', (r.deps || []).length], ['ck', 'Checklist', `${done}/${r.checklist.length}`]];
   $('rep').innerHTML = `
   <div class="row" style="margin-bottom:6px"><button class="btn" id="back">← Report</button><div class="grow"></div><button class="btn" id="copy">⧉ Copia link</button><a class="btn" href="/api/reports/${r.id}.md" download="report-${r.id}.md">⬇ Markdown</a></div>
   <h2><span class="pill ac" style="font-size:16px">${esc(r.base)}</span> ← ${esc(r.branch)}</h2>
@@ -112,7 +112,7 @@ function drawReport() {
   $('back').onclick = () => { $('rep').innerHTML = ''; loadList(); };
   $('copy').onclick = () => { navigator.clipboard?.writeText(location.origin + '/#' + r.id); toast('Link copiato'); };
   $('rep').querySelectorAll('.tab').forEach((t) => t.onclick = () => { tab = t.dataset.t; drawReport(); });
-  ({ ov: pOv, fl: pFiles, cm: pCommits, fd: pFind, dp: pDeps, ck: pCheck })[tab]();
+  ({ rv: pReview, ov: pOv, fl: pFiles, cm: pCommits, fd: pFind, dp: pDeps, ck: pCheck })[tab]();
 }
 function pOv() {
   const r = R, s = r.summary, sc = score(s), tot = Math.max(1, s.findings), done = r.checklist.filter((c) => c.checked).length;
@@ -176,19 +176,69 @@ function pCheck() {
 }
 if (location.hash.length > 3) { $('rep').innerHTML = ' '; view('rep'); showReport(location.hash.slice(1)).catch(() => {}); }
 
+/* ---------- revisione: checklist riga per riga ---------- */
+const LV = { problem: ['Problema', 'critical'], check: ['Da verificare', 'medium'], trivial: ['Banale', 'info'] };
+async function decide(keys, state) {
+  const sy = window.scrollY;
+  const res = await post(`/api/reports/${R.id}/review`, { keys, state }, 'POST');
+  const set = new Set(keys); R.review.items.forEach((i) => { if (set.has(i.key) && i.state !== 'superseded') i.state = state; });
+  R.review.stats = res.stats; R.checklist = res.checklist; drawReport(); window.scrollTo(0, sy);
+}
+function pReview() {
+  const r = R, st = r.review.stats, all = r.review.items, q = rvQ.toLowerCase();
+  const active = all.filter((i) => i.state !== 'superseded');
+  const match = (i) => (rvF === 'all' || (rvF === 'todo' && i.state === 'open') || (rvF === 'problem' && i.level === 'problem') || (rvF === 'fix' && i.state === 'fix') || (rvF === 'aware' && i.state === 'aware')) && (`${i.file} ${i.tags.map((t) => t.label).join(' ')}`).toLowerCase().includes(q);
+  const pct = (n) => (st.total ? n / st.total * 100 : 0);
+  const fixes = active.filter((i) => i.state === 'fix');
+  const ready = st.total > 0 && !st.blocking && !st.toDecide;
+  const groups = r.commits.map((c) => ({ c, its: active.filter((i) => i.commit === c.short && match(i)), tot: active.filter((i) => i.commit === c.short) })).filter((g) => g.its.length);
+  const sup = all.filter((i) => i.state === 'superseded');
+  $('pane').innerHTML = `
+  ${r.review.resolved?.length ? `<div class="card" style="border-color:var(--ok)"><b style="color:var(--ok)">✔ ${r.review.resolved.length} fix verificati</b> <span class="hint">le modifiche marcate «da fixare» non risultano più nel branch:</span>${r.review.resolved.map((x) => `<div class="hint mono">${esc(x.file)} — ${esc(x.label)}</div>`).join('')}</div>` : ''}
+  <div class="card"><div class="row"><div class="grow"><h3 style="margin-bottom:2px">${ready ? '✅ Tutto deciso, nessun problema bloccante' : `Decisioni: ${st.total - st.toDecide}/${st.total}`}</h3>
+   <div class="hint">${st.blocking ? `<b style="color:var(--crit)">${st.blocking} problemi bloccanti</b> da fixare nel codice o da accettare · ` : ''}${st.fix} da fixare · ${st.aware} consapevoli · ${st.open} da decidere${st.superseded ? ` · ${st.superseded} già riscritte in commit successivi` : ''}</div></div>
+   <button class="btn" id="rvTriv">✔ Banali → consapevole</button><button class="btn p" id="rvRe">↻ Ri-analizza dopo i fix</button></div>
+   <div class="stack" style="height:10px"><i style="width:${pct(st.aware)}%;background:var(--ok)"></i><i style="width:${pct(st.fix)}%;background:var(--high)"></i></div>
+   ${r.review.truncated ? `<div class="hint" style="color:var(--high)">⚠ ${r.review.truncated} voci banali non mostrate (limite)</div>` : ''}</div>
+  ${fixes.length ? `<details class="card"><summary><b>🔧 Da fixare (${fixes.length})</b> <span class="hint">clic per l'elenco · poi committa e «Ri-analizza»</span></summary><div style="margin-top:10px">${fixes.map((i) => `<div class="mono" style="margin:4px 0">☐ ${esc(i.file)}:${i.newStart} <span class="hint">(${i.commit})</span> — ${esc(i.tags.filter((t) => t.sev !== 'none').map((t) => t.label).join('; '))}</div>`).join('')}<button class="btn" id="rvCopy" style="margin-top:8px">⧉ Copia come TODO</button></div></details>` : ''}
+  <div class="row" style="margin-bottom:12px"><input class="grow" id="rvq" placeholder="Cerca file o tipo di modifica…" value="${esc(rvQ)}">${[['todo', 'Da decidere'], ['problem', 'Problemi'], ['fix', 'Da fixare'], ['aware', 'Consapevole'], ['all', 'Tutte']].map(([k, n]) => `<button class="chip ${rvF === k ? 'on' : ''}" data-f="${k}">${n}</button>`).join('')}</div>
+  ${groups.length ? groups.map(({ c, its, tot }) => { const dn = tot.filter((i) => i.state !== 'open').length, op = rvOpen[c.short] !== false;
+    return `<div class="card"><div class="row" data-ct="${c.short}" style="cursor:pointer"><span>${op ? '▾' : '▸'}</span><span class="mono">${c.short}</span><b class="grow">${esc(c.subject)}</b><span class="pill">${dn}/${tot.length}</span><button class="btn" data-all="${c.short}" style="padding:4px 10px">✔ Tutto ok</button></div>
+    ${op ? its.map((i) => item(i)).join('') : ''}</div>`; }).join('') : `<div class="card empty">${all.length ? 'Nessuna modifica con questo filtro 🎉' : 'Nessuna modifica da rivedere'}</div>`}
+  ${sup.length ? `<details class="card"><summary class="hint">${sup.length} modifiche riscritte o annullate in commit successivi (non richiedono decisione)</summary>${sup.map((i) => `<div class="mono hint" style="margin:4px 0">${i.commit} ${esc(i.file)}:${i.newStart} — ${esc(i.tags.filter((t) => t.sev !== 'none').map((t) => t.label).join('; ') || 'modifica banale')}</div>`).join('')}</details>` : ''}`;
+  $('rvq').oninput = (e) => { rvQ = e.target.value; const p = e.target.selectionStart; pReview(); $('rvq').focus(); $('rvq').setSelectionRange(p, p); };
+  $('pane').querySelectorAll('[data-f]').forEach((c) => c.onclick = () => { rvF = c.dataset.f; pReview(); });
+  $('pane').querySelectorAll('[data-ct]').forEach((c) => c.onclick = (e) => { if (e.target.closest('button')) return; rvOpen[c.dataset.ct] = rvOpen[c.dataset.ct] === false; pReview(); });
+  $('pane').querySelectorAll('[data-all]').forEach((b) => b.onclick = () => { const its = active.filter((i) => i.commit === b.dataset.all && i.level !== 'problem' && i.state === 'open'); if (!its.length) return toast('Restano solo problemi: decidili uno per uno'); decide(its.map((i) => i.key), 'aware'); });
+  $('pane').querySelectorAll('[data-act]').forEach((b) => b.onclick = () => decide([b.dataset.k], b.dataset.act));
+  $('rvTriv').onclick = () => { const its = active.filter((i) => i.level === 'trivial' && i.state === 'open'); its.length ? decide(its.map((i) => i.key), 'aware') : toast('Nessuna voce banale da decidere'); };
+  if ($('rvCopy')) $('rvCopy').onclick = () => { navigator.clipboard?.writeText(fixes.map((i) => `- [ ] ${i.file}:${i.newStart} (${i.commit}) ${i.tags.filter((t) => t.sev !== 'none').map((t) => t.label).join('; ')}`).join('\n')); toast('TODO copiato'); };
+  $('rvRe').onclick = async () => { $('rvRe').disabled = true; toast('Ri-analisi in corso…'); try { const { job } = await post('/api/analyze', { path: r.repo, branch: r.branch, base: r.base, useAI: false }); for (;;) { await new Promise((x) => setTimeout(x, 500)); const j = await api('/api/jobs/' + job); if (j.status === 'error') throw new Error(j.error); if (j.status === 'done') { await showReport(j.reportId); toast('Ri-analisi completata'); break; } } } catch (e) { toast('❌ ' + e.message); $('rvRe').disabled = false; } };
+}
+function item(i) {
+  const [lvl, cls] = LV[i.level], real = i.tags.filter((t) => t.sev !== 'none'), open = i.level !== 'trivial';
+  const stCls = i.state === 'aware' ? 'var(--ok)' : i.state === 'fix' ? 'var(--high)' : 'var(--bd)';
+  return `<div class="item" style="border-left:3px solid ${stCls};padding-left:12px;margin:8px 0;flex-direction:column;gap:6px;background:${i.state === 'open' ? 'transparent' : 'var(--panel2)'}">
+   <div class="row"><span class="tag ${cls}">${lvl}</span><span class="mono grow">${esc(i.fileStatus === 'D' ? '(eliminato) ' : '')}${esc(i.oldPath ? i.oldPath + ' → ' : '')}${esc(i.file)}${i.newStart ? ':' + i.newStart : ''}</span>
+    ${i.state === 'aware' ? '<span class="pill" style="color:var(--ok)">✔ consapevole</span>' : i.state === 'fix' ? '<span class="pill" style="color:var(--high)">🔧 da fixare</span>' : ''}</div>
+   ${real.length ? `<div class="row">${real.map((t) => `<span class="tag ${t.sev}" title="${esc(t.hint)}">${esc(t.label)}</span>`).join('')}</div>${real.filter((t) => t.hint).slice(0, 3).map((t) => `<div class="hint">↳ ${esc(t.hint)}${t.detail ? ` <span class="mono">${esc(t.detail)}</span>` : ''}</div>`).join('')}` : `<div class="hint">${esc(i.tags[0]?.label || '')}</div>`}
+   ${i.lines.length ? `<details ${open ? 'open' : ''}><summary class="hint">Righe modificate (${i.lines.length}${i.extra ? '+' + i.extra : ''})</summary><div class="diff mono" style="max-height:240px;margin-top:4px">${i.lines.map((l) => `<div class="${l.k === '+' ? 'p' : 'm'}"><span class="ln">${l.n}</span><span class="sg">${l.k}</span>${esc(l.t)}</div>`).join('')}</div></details>` : ''}
+   <div class="row"><button class="btn" data-act="aware" data-k="${i.key}" style="padding:5px 12px">✔ Sono consapevole</button><button class="btn" data-act="fix" data-k="${i.key}" style="padding:5px 12px">🔧 Da fixare</button>${i.state !== 'open' ? `<button class="btn" data-act="open" data-k="${i.key}" style="padding:5px 12px">↺ Annulla</button>` : ''}</div></div>`;
+}
+
 /* ---------- config ---------- */
 const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'timeoutMs'], BF = ['monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
 async function loadCfg() {
   quota(); const c = await api('/api/config');
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled;
   BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;
-  $('a_maxCommits').value = c.analysis.maxCommits; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours;
+  $('a_maxCommits').value = c.analysis.maxCommits; $('a_maxReview').value = c.analysis.maxReviewItems; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours;
 }
 $('save').onclick = async () => {
   try {
     const ai = { enabled: $('c_enabled').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value); ai.timeoutMs = +ai.timeoutMs || 60000;
     const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = +$('b_' + k).value);
-    await post('/api/config', { ai, budget, analysis: { maxCommits: +$('a_maxCommits').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
+    await post('/api/config', { ai, budget, analysis: { maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
     $('cmsg').textContent = 'Valori incoerenti riportati nei limiti: mese ≥ analisi ≥ chiamata'; toast('✔ Configurazione salvata'); loadCfg();
   } catch (e) { toast('❌ ' + e.message); }
 };

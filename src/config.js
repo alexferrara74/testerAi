@@ -33,6 +33,7 @@ export const DEFAULTS = {
   analysis: {
     maxFilesDetail: 300,
     maxCommits: 100,
+    maxReviewItems: 500,
     cve: { enabled: true, osvUrl: 'https://api.osv.dev', cacheHours: 24, timeoutMs: 10000 },
     maxHunkLinesPerFile: 150,
     ignorePaths: ['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'dist/', 'build/', 'node_modules/', '.min.'],
@@ -62,6 +63,7 @@ export function saveConfig(patch) {
   if (typeof next.ai.extraHeaders === 'string') { try { next.ai.extraHeaders = JSON.parse(next.ai.extraHeaders || '{}'); } catch { throw new Error('extraHeaders non e\' JSON valido'); } }
   next.analysis.cve.cacheHours = num(next.analysis.cve.cacheHours, 0, 720, 24);
   next.analysis.cve.timeoutMs = num(next.analysis.cve.timeoutMs, 1000, 60000, 10000);
+  next.analysis.maxReviewItems = num(next.analysis.maxReviewItems, 20, 5000, 500);
   next.analysis.maxCommits = num(next.analysis.maxCommits, 1, 1000, 100);
   const b = next.budget;
   b.monthlyTokens = num(b.monthlyTokens, 100, 1e9, 2000);

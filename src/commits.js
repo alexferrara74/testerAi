@@ -22,7 +22,7 @@ export async function analyzeCommits(repo, commits, { ignored, max = 100 }) {
       const touchesTests = st.some((s) => R.isTestPath(s.path));
       out.set(c.hash, {
         files: st.map((s) => ({ status: s.status, path: s.path, oldPath: s.oldPath })),
-        findings, touchesSrc, touchesTests,
+        findings, touchesSrc, touchesTests, diff,
         risk: findings.reduce((n, f) => n + (W[f.severity] || 0), 0) + (touchesSrc && !touchesTests ? 1 : 0),
       });
     }));

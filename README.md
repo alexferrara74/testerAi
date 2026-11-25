@@ -24,6 +24,14 @@ Il limite è un **contatore mensile persistente** (`data/usage.json`, si azzera 
 - **Cache** su disco: stessa richiesta = 0 token. Il test di connessione costa ~15 token e viene contato.
 - Disattiva "Usa AI" per un'analisi completamente gratuita.
 
+## Revisione riga per riga (checklist decisionale, 0 token)
+Ogni hunk di ogni commit diventa una voce della scheda **Revisione**, classificata staticamente:
+- **Logica inserita**: nuove condizioni, cicli, asincronia, gestione errori, I/O, accesso ai dati, sicurezza/autorizzazione, input non fidato, soglie/config, nuove funzioni.
+- **Possibili regressioni**: controllo/validazione rimosso, gestione errori o controlli di accesso rimossi, `await` o rilascio risorse tolti, operatore/soglia modificati (`<`→`<=`, `&&`→`||`), test indeboliti o saltati, blocchi eliminati, file/test cancellati.
+- **Livello**: *Problema* (da fixare o accettare esplicitamente), *Da verificare*, *Banale* (solo commenti/formattazione/riordino import).
+
+Per ogni voce scegli **«Sono consapevole»** oppure **«Da fixare»** (nel codice). Poi committa il fix e premi **«Ri-analizza»**: le decisioni sono salvate per *contenuto* (non per commit/riga, quindi sopravvivono a rebase e ri-analisi); le voci «da fixare» che non risultano più nel branch finiscono tra i **fix verificati**; le modifiche riscritte o annullate in un commit successivo sono escluse dalle decisioni. «Tutto ok» per commit e «Banali → consapevole» accelerano la revisione; l'elenco «Da fixare» si copia come TODO e compare nell'export Markdown. La checklist ha la voce *Revisione di ogni modifica* che diventa verde solo quando tutto è deciso e nessun problema è bloccante.
+
 ## Verifica CVE delle dipendenze (0 token)
 Confronta manifest e lockfile tra base e branch (`package.json`+`package-lock.json`, `requirements.txt` con versioni `==`, `go.mod`) e interroga [OSV.dev](https://osv.dev) **solo per le dipendenze aggiunte o cambiate**. Per ogni CVE: gravità, versione che la corregge, voce in checklist e tabella nel report. Cache su disco (default 24h) per limitare le chiamate di rete. In azienda l'URL è modificabile da FE (mirror/proxy interno di OSV); se la rete non è raggiungibile l'analisi prosegue e la voce risulta "non verificata". Senza lockfile le versioni `^x.y` sono valutate sul valore minimo del range (segnalato).
 

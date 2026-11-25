@@ -6,6 +6,7 @@ import * as R from './rules.js';
 import { retrieveDocs } from './tokens.js';
 import { analyzeCommits, findingKey } from './commits.js';
 import { changedDeps, checkCves } from './deps.js';
+import { buildReview, reviewStats, reviewChecklistItem, loadStore, saveStore } from './review.js';
 import { triage } from './ai.js';
 import { loadConfig, DATA } from './config.js';
 
@@ -99,6 +100,20 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
       findings: a.findings.map((f) => ({ rule: f.rule, severity: f.severity, file: f.file, line: f.line, message: f.message, code: f.code, fixedLater: !!f.code && !finalKeys.has(findingKey(f)) })) };
   }
 
+  /* --- revisione riga per riga: ogni hunk di ogni commit diventa una voce da decidere (0 token) --- */
+  onProgress('Revisione di ogni modifica');
+  const store = loadStore(repo, branch);
+  const review = buildReview({ commits, perCommit: perCommit.byHash, finalDiff: diff, store, ignored: (p) => ignored(cfg, p), max: cfg.analysis.maxReviewItems });
+  saveStore(repo, branch, store);
+  for (const it of review.items) {
+    if (it.state === 'superseded') continue;
+    for (const t of it.tags) {
+      if (t.rule || (SEV[t.sev] || 0) < 4) continue; // le regole statiche sono gia' tra le segnalazioni
+      const first = it.lines.find((l) => l.k === (t.id.startsWith('reg-') && !/op|const|lit|await/.test(t.id) ? '-' : '+')) || it.lines[0];
+      add({ rule: 'REV-' + t.id.toUpperCase(), category: t.id.startsWith('reg-') ? 'regression' : 'security', severity: t.sev, file: it.file, line: first?.n || it.newStart, commit: it.commit, message: t.label + (t.detail ? `: ${t.detail}` : ''), code: (first?.t || '').trim().slice(0, 160) });
+    }
+  }
+
   /* --- regressioni: simboli rimossi/cambiati ancora usati --- */
   onProgress('Ricerca simboli rimossi o con firma cambiata');
   let symChecks = 0;
@@ -177,6 +192,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     item('c8', 'Commit chiari e di dimensione ragionevole', has('GIT-MSG', 'GIT-BIG-COMMIT'), 'valutare squash/riscrittura messaggi'),
     { id: 'c9', title: `Branch aggiornato rispetto a ${base}`, status: behind ? 'warn' : 'pass', detail: behind ? `${behind} commit di ${base} non ancora integrati: rischio regressioni al merge` : 'allineato', checked: false },
     { id: 'c10', title: 'Working tree pulito (nessuna modifica non committata)', status: dirty.length ? 'warn' : 'pass', detail: dirty.length ? `${dirty.length} file non committati: non analizzati` : 'pulito', checked: false },
+    { ...reviewChecklistItem(reviewStats(review.items)), checked: false },
     { id: 'c11', title: 'Revisione AI completata', status: aiInfo.used ? (aiInfo.skipped || aiInfo.errors.length ? 'warn' : 'pass') : 'manual', detail: aiInfo.used ? `${aiInfo.calls} chiamate, ${aiInfo.spent} token spesi, ${aiInfo.skipped} elementi non inviati per budget` : aiInfo.note, checked: false },
   ];
 
@@ -187,6 +203,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     summary: { commits: commits.length, commitsAnalyzed: perCommit.analyzed, files: files.length, added: files.reduce((s, f) => s + f.add, 0), deleted: files.reduce((s, f) => s + f.del, 0), findings: findings.length, bySeverity: bySev,
       byStatus: files.reduce((o, f) => (o[f.status] = (o[f.status] || 0) + 1, o), {}) },
     commits, files, findings, checklist, ai: aiInfo, deps, cve: cveInfo,
+    review: { items: review.items, stats: reviewStats(review.items), resolved: review.resolved, truncated: review.truncated },
   };
   fs.mkdirSync(path.join(DATA, 'reports'), { recursive: true });
   fs.writeFileSync(path.join(DATA, 'reports', report.id + '.json'), JSON.stringify(report));
@@ -207,12 +224,40 @@ export function setChecked(id, itemId, checked) {
   c.checked = !!checked; fs.writeFileSync(rpath(id), JSON.stringify(r)); return r;
 }
 
+export function setReviewState(id, keys, state, note) {
+  if (!['open', 'aware', 'fix'].includes(state)) throw new Error('stato non valido');
+  const r = getReport(id); const store = loadStore(r.repo, r.branch); const set = new Set(keys);
+  for (const it of r.review.items) {
+    if (!set.has(it.key) || it.state === 'superseded') continue;
+    it.state = state; if (note !== undefined) it.note = note;
+    if (state === 'open') delete store[it.key];
+    else store[it.key] = { state, file: it.file, label: it.tags.map((t) => t.label).slice(0, 2).join(' · '), note: it.note || '', at: new Date().toISOString() };
+  }
+  saveStore(r.repo, r.branch, store);
+  r.review.stats = reviewStats(r.review.items);
+  const c = r.checklist.find((x) => x.id === 'c14'); if (c) Object.assign(c, reviewChecklistItem(r.review.stats));
+  fs.writeFileSync(rpath(id), JSON.stringify(r));
+  return { stats: r.review.stats, checklist: r.checklist };
+}
+
 export function toMarkdown(r) {
   const L = [];
   L.push(`# Report analisi: ${r.branch} ← ${r.base}`, '', `- Repo: \`${r.repo}\``, `- Data: ${r.createdAt}`, `- Merge-base: \`${r.mergeBase.slice(0, 10)}\`${r.baseDetected ? ' (base dedotto automaticamente)' : ''}`,
     `- Commit: ${r.summary.commits} · File: ${r.summary.files} · +${r.summary.added}/-${r.summary.deleted}`, `- Segnalazioni: ${r.summary.findings} ${JSON.stringify(r.summary.bySeverity)}`,
     `- AI: ${r.ai.used ? `${r.ai.calls} chiamate (${r.ai.cached} da cache), ${r.ai.spent} token spesi (quota mensile ${r.ai.monthlyUsedBefore + r.ai.spent}/${r.ai.monthlyLimit}), non inviati ${r.ai.skipped}` : r.ai.note}`, '', '## Checklist');
   for (const c of r.checklist) L.push(`- [${c.checked ? 'x' : ' '}] ${{ pass: '✅', warn: '⚠️', fail: '❌', manual: '👁️' }[c.status]} **${c.title}** — ${c.detail}`);
+  if (r.review) {
+    const st = r.review.stats;
+    L.push('', '## Revisione modifiche', '', `${st.total - st.toDecide}/${st.total} decise · ${st.aware} consapevoli · ${st.fix} da fixare · ${st.blocking} problemi bloccanti · ${st.superseded} riscritte in commit successivi`);
+    if (r.review.resolved?.length) L.push('', `Fix verificati: ${r.review.resolved.length}`);
+    const todo = r.review.items.filter((i) => i.state === 'fix');
+    if (todo.length) { L.push('', '### Da fixare'); for (const i of todo) L.push(`- [ ] \`${i.file}:${i.newStart}\` (${i.commit}) — ${i.tags.map((t) => t.label).join('; ')}${i.note ? ' — ' + i.note : ''}`); }
+    for (const c of r.commits) {
+      const its = r.review.items.filter((i) => i.commit === c.short && i.state !== 'superseded'); if (!its.length) continue;
+      L.push('', `### ${c.short} ${c.subject}`);
+      for (const i of its) L.push(`- [${i.state === 'aware' ? 'x' : ' '}] ${i.level === 'problem' ? '❌' : i.level === 'trivial' ? '·' : '👁️'} \`${i.file}:${i.newStart}\` ${i.state === 'fix' ? '**DA FIXARE** ' : ''}${i.tags.filter((t) => t.sev !== 'none').map((t) => t.label).join('; ') || 'modifica banale'}`);
+    }
+  }
   L.push('', '## Modifiche rispetto a ' + r.base, '', '| Stato | File | + | - |', '|---|---|---|---|');
   for (const f of r.files) L.push(`| ${f.status} | ${f.oldPath ? f.oldPath + ' → ' : ''}${f.path} | ${f.add} | ${f.del} |`);
   if (r.deps?.length) { L.push('', '## Dipendenze modificate', '', '| Pacchetto | Da | A | CVE |', '|---|---|---|---|'); for (const d of r.deps) L.push(`| ${d.ecosystem}:${d.name} | ${d.from || '-'} | ${d.to} | ${d.vulns === null ? 'non verificato' : d.vulns.length ? d.vulns.map((v) => v.cve || v.id).join(', ') : 'nessuna'} |`); }
