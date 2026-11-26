@@ -4,24 +4,16 @@ import path from 'node:path';
 import { DATA } from './config.js';
 import { estimate, fit } from './tokens.js';
 import { remaining, record, readUsage } from './usage.js';
-import os from 'node:os';
 import { guardedFetch, redact } from './privacy.js';
 import { loadConfig } from './config.js';
 
 /* ---------------- GitHub Copilot: scambio token ---------------- */
-// Il token GitHub (OAuth del tuo login Copilot) si scambia con un token Copilot di breve durata.
-// NB: l'endpoint di scambio e' quello usato dai plugin ufficiali ma non e' documentato come API pubblica.
-export function readLocalCopilotToken() {
-  const dirs = [path.join(os.homedir(), '.config', 'github-copilot'), process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'github-copilot')].filter(Boolean);
-  for (const d of dirs) for (const f of ['apps.json', 'hosts.json']) {
-    try { const j = JSON.parse(fs.readFileSync(path.join(d, f), 'utf8')); for (const v of Object.values(j)) if (v?.oauth_token) return v.oauth_token; } catch { /* prossimo */ }
-  }
-  return '';
-}
+// Il token GitHub (OAuth Copilot) lo inserisci TU nel campo API key: non viene letto automaticamente dal PC.
+// Si scambia con un token Copilot di breve durata. L'endpoint di scambio non e' documentato come API pubblica.
 const ctok = new Map();
 async function copilotToken(ai) {
-  const oauth = ai.apiKey || (ai.copilotAutoToken ? readLocalCopilotToken() : '');
-  if (!oauth) throw new Error('Copilot: manca il token GitHub (incollalo nel campo API key oppure abilita la lettura del login Copilot locale)');
+  const oauth = ai.apiKey;
+  if (!oauth) throw new Error('Copilot: manca il token GitHub (inseriscilo nel campo API key)');
   const hit = ctok.get(oauth); if (hit && hit.exp - 60e3 > Date.now()) return hit.token;
   const res = await guardedFetch(ai.copilotTokenUrl, { method: 'GET', headers: { authorization: `token ${oauth}`, accept: 'application/json', 'user-agent': 'GitHubCopilotChat/0.22.0', 'editor-version': 'vscode/1.95.0' }, signal: AbortSignal.timeout(ai.timeoutMs || 60000) }, 'ai-token');
   const raw = await res.text();
@@ -214,10 +206,39 @@ export async function diagnose(cfg) {
   const host = (u) => { try { return new URL(u).host; } catch { return u; } };
   const step = async (name, fn) => { try { steps.push({ name, ok: true, detail: (await fn()) || '' }); return true; } catch (e) { steps.push({ name, ok: false, detail: e.message, hint: e.hint || '' }); return false; } };
   if (ai.provider === 'copilot') {
-    if (!(await step('Token GitHub', async () => { if (ai.apiKey) return 'API key impostata'; if (ai.copilotAutoToken) { if (readLocalCopilotToken()) return 'letto dal login Copilot locale (mai inviato altrove che a GitHub)'; throw new Error('login Copilot locale non trovato in ~/.config/github-copilot'); } throw new Error('nessun token: incolla la API key o abilita «usa il login già presente»'); }))) return steps;
+    if (!(await step('Token GitHub', async () => { if (ai.apiKey) return 'API key impostata'; throw new Error('nessun token: inseriscilo nel campo API key'); }))) return steps;
     ctok.clear();
     if (!(await step(`Scambio token con GitHub (${host(ai.copilotTokenUrl)})`, async () => { await copilotToken(ai); return 'token Copilot ottenuto: licenza valida'; }))) return steps;
   }
   await step(`Chiamata al modello (${host(ai.baseUrl)})`, async () => { const r = await callModel(ai, 'Reply {}', 'x', 5); record((r.tin || 0) + (r.tout || 0) || 15, 'test'); return `risposta ricevuta (${(r.tin || 0) + (r.tout || 0) || '~15'} token)`; });
   return steps;
+}
+
+/** Elenco dei modelli disponibili per il provider configurato (0 token: e' una GET sull'host gia' consentito). */
+export async function listModels(ai) {
+  const base = ai.baseUrl.replace(/\/+$/, ''); const u = new URL(base);
+  const headers = { accept: 'application/json', ...(ai.extraHeaders || {}) };
+  let url, parse;
+  const arr = (j) => (Array.isArray(j) ? j : j.data || j.models || []);
+  if (ai.provider === 'anthropic') {
+    url = `${base}/v1/models?limit=100`; headers['anthropic-version'] = '2023-06-01'; if (ai.apiKey) headers['x-api-key'] = ai.apiKey;
+    parse = (j) => arr(j).map((m) => ({ id: m.id, name: m.display_name || m.id }));
+  } else if (ai.provider === 'ollama') {
+    url = `${base}/api/tags`; parse = (j) => arr(j).map((m) => ({ id: m.name, name: m.name }));
+  } else if (ai.provider === 'copilot') {
+    url = `${base}/models`;
+    Object.assign(headers, { authorization: `Bearer ${await copilotToken(ai)}`, 'editor-version': 'vscode/1.95.0', 'copilot-integration-id': 'vscode-chat', 'user-agent': 'GitHubCopilotChat/0.22.0' });
+    parse = (j) => arr(j).filter((m) => !m.capabilities || m.capabilities.type === 'chat').filter((m) => m.model_picker_enabled !== false).map((m) => ({ id: m.id, name: m.name || m.id }));
+  } else {
+    if (ai.apiKey) headers[ai.authHeader || 'Authorization'] = ai.authScheme ? `${ai.authScheme} ${ai.apiKey}` : ai.apiKey;
+    if (u.hostname === 'models.github.ai') { url = `${u.origin}/catalog/models`; parse = (j) => arr(j).map((m) => ({ id: m.id, name: m.name || m.id })); }
+    else if (/openai\.azure\.com$/.test(u.hostname)) { url = `${u.origin}/openai/deployments?api-version=${encodeURIComponent(ai.apiVersion || '2023-03-15-preview')}`; parse = (j) => arr(j).map((d) => ({ id: d.id, name: d.model ? `${d.id} (${d.model})` : d.id })); }
+    else { url = `${base}/models${ai.apiVersion ? `?api-version=${encodeURIComponent(ai.apiVersion)}` : ''}`; parse = (j) => arr(j).filter((m) => !/embed|whisper|tts|dall-e|moderation|davinci-002|babbage|realtime|audio|image/i.test(m.id || '')).map((m) => ({ id: m.id, name: m.name || m.id })); }
+  }
+  const res = await guardedFetch(url, { method: 'GET', headers, signal: AbortSignal.timeout(ai.timeoutMs || 60000) }, 'ai');
+  const raw = await res.text();
+  if (!res.ok) { const e = new Error(`Elenco modelli ${res.status}: ${raw.slice(0, 160)}`); e.hint = res.status === 401 || res.status === 403 ? 'Credenziali non valide o senza permesso di elencare i modelli.' : 'Questo provider potrebbe non esporre l\'elenco: indica il modello a mano.'; throw e; }
+  let list; try { list = parse(JSON.parse(raw)); } catch { throw Object.assign(new Error('Risposta non riconosciuta dall\'endpoint dei modelli'), { hint: 'Indica il modello a mano.' }); }
+  const seen = new Set();
+  return list.filter((m) => m.id && !seen.has(m.id) && seen.add(m.id)).sort((a, b) => a.id.localeCompare(b.id));
 }

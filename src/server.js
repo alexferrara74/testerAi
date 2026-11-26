@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig, publicConfig, ROOT } from './config.js';
 import * as G from './git.js';
 import { analyze, PHASES, listReports, getReport, setChecked, setReviewState, toMarkdown } from './analyzer.js';
-import { diagnose, readLocalCopilotToken } from './ai.js';
+import { diagnose, listModels } from './ai.js';
 import { readUsage, setUsed } from './usage.js';
 import { allowedDestinations, readEgressLog } from './privacy.js';
 
@@ -57,7 +57,10 @@ export function createServer() {
         const mask = (x) => (x ? x.replace(/\/\/[^@/]*@/, '//***@') : ''); const pe = process.env;
         return send(res, 200, { ...allowedDestinations(), proxyEnv: mask(pe.HTTPS_PROXY || pe.https_proxy || pe.HTTP_PROXY || pe.http_proxy || ''), caEnv: pe.NODE_EXTRA_CA_CERTS || '', dataDir: (await import('./config.js')).DATA, log: readEgressLog(50) });
       }
-      if (req.method === 'GET' && u.pathname === '/api/copilot/detect') return send(res, 200, { found: !!readLocalCopilotToken() }); // mai il token
+      if (req.method === 'POST' && u.pathname === '/api/models') {
+        try { return send(res, 200, { ok: true, models: await listModels(loadConfig().ai) }); }
+        catch (e) { return send(res, 200, { ok: false, error: e.message, hint: e.hint || '' }); }
+      }
       if (u.pathname === '/api/config') {
         if (req.method === 'GET') return send(res, 200, publicConfig());
         if (req.method === 'PUT') return send(res, 200, publicConfig(saveConfig(await readBody(req))));

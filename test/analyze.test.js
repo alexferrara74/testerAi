@@ -295,3 +295,26 @@ test('rete: causa reale invece di "fetch failed", proxy aziendale, diagnostica C
   assert.ok(steps[0].ok && !steps[1].ok && /proxy/i.test(steps[1].detail) && steps.length === 2, JSON.stringify(steps));
   saveConfig({ privacy: { proxyUrl: '' } }); proxy.close(); proxy2.close();
 });
+
+test('elenco modelli per provider (si sceglie, non si digita) e nessun auto-token', async () => {
+  const { listModels } = await import('../src/ai.js'); const { loadConfig } = await import('../src/config.js');
+  const reqs = [];
+  const srv = http.createServer((req, res) => { reqs.push({ url: req.url, auth: req.headers.authorization, key: req.headers['x-api-key'] }); res.setHeader('content-type', 'application/json');
+    if (req.url === '/copilot_internal/v2/token') return res.end(JSON.stringify({ token: 'cop-tok', expires_at: Math.floor(Date.now() / 1000) + 1500 }));
+    if (req.url === '/models' && /cop-tok/.test(req.headers.authorization || '')) return res.end(JSON.stringify({ data: [{ id: 'gpt-4o', name: 'GPT-4o', capabilities: { type: 'chat' } }, { id: 'text-embedding-3', capabilities: { type: 'embeddings' } }, { id: 'claude-sonnet', name: 'Claude Sonnet', capabilities: { type: 'chat' }, model_picker_enabled: true }, { id: 'gpt-4o', capabilities: { type: 'chat' } }] }));
+    if (req.url === '/v1/models?limit=100') return res.end(JSON.stringify({ data: [{ id: 'claude-x', display_name: 'Claude X' }] }));
+    if (req.url === '/api/tags') return res.end(JSON.stringify({ models: [{ name: 'qwen2.5-coder' }, { name: 'llama3' }] }));
+    if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'gpt-4.1' }, { id: 'text-embedding-3-small' }, { id: 'whisper-1' }, { id: 'gpt-4o-mini' }] }));
+    res.statusCode = 404; res.end('{}'); }).listen(0);
+  const root = `http://127.0.0.1:${srv.address().port}`;
+  const set = (ai) => { saveConfig({ ai: { enabled: true, apiKey: 'k', ...ai } }); return loadConfig().ai; };
+  let m = await listModels(set({ provider: 'copilot', baseUrl: root, copilotTokenUrl: root + '/copilot_internal/v2/token', apiKey: 'ghu_x' }));
+  assert.deepEqual(m.map((x) => x.id), ['claude-sonnet', 'gpt-4o'], 'solo modelli chat, senza duplicati');
+  m = await listModels(set({ provider: 'anthropic', baseUrl: root })); assert.deepEqual(m, [{ id: 'claude-x', name: 'Claude X' }]); assert.equal(reqs.at(-1).key, 'k');
+  m = await listModels(set({ provider: 'ollama', baseUrl: root })); assert.deepEqual(m.map((x) => x.id), ['llama3', 'qwen2.5-coder']);
+  m = await listModels(set({ provider: 'openai', baseUrl: root + '/v1' })); assert.deepEqual(m.map((x) => x.id), ['gpt-4.1', 'gpt-4o-mini'], 'esclusi embedding/whisper');
+  await assert.rejects(listModels(set({ provider: 'openai', baseUrl: root + '/nope' })), (e) => /404/.test(e.message) && !!e.hint);
+  // il login locale di Copilot non viene piu' letto: senza apiKey errore esplicito
+  await assert.rejects(listModels(set({ provider: 'copilot', baseUrl: root, copilotTokenUrl: root + '/copilot_internal/v2/token', apiKey: '' })), /campo API key/);
+  srv.close();
+});

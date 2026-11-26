@@ -19,7 +19,6 @@ export const DEFAULTS = {
     authScheme: 'Bearer',        // vuoto = solo chiave
     extraHeaders: {},
     copilotTokenUrl: 'https://api.github.com/copilot_internal/v2/token', // solo provider copilot (GHE: tuo host)
-    copilotAutoToken: false,     // legge il login Copilot gia' presente sul PC (~/.config/github-copilot)
     apiVersion: '',              // Azure: ?api-version=
     temperature: 0,
     timeoutMs: 60000,
@@ -76,7 +75,7 @@ export function saveConfig(patch) {
   next.ai.provider = ['openai', 'anthropic', 'ollama', 'copilot'].includes(next.ai.provider) ? next.ai.provider : 'openai';
   if (typeof next.ai.extraHeaders === 'string') { try { next.ai.extraHeaders = JSON.parse(next.ai.extraHeaders || '{}'); } catch { throw new Error('extraHeaders non e\' JSON valido'); } }
   next.privacy.proxyUrl = String(next.privacy.proxyUrl || '').trim(); next.privacy.caFile = String(next.privacy.caFile || '').trim();
-  next.ai.copilotAutoToken = !!next.ai.copilotAutoToken;
+  delete next.ai.copilotAutoToken; // rimosso: il token si inserisce solo a mano
   for (const k of ['offline', 'sendCode', 'redactSecrets', 'allowHttp']) next.privacy[k] = !!next.privacy[k];
   next.analysis.cve.cacheHours = num(next.analysis.cve.cacheHours, 0, 720, 24);
   next.analysis.cve.timeoutMs = num(next.analysis.cve.timeoutMs, 1000, 60000, 10000);
