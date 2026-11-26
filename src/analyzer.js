@@ -8,15 +8,17 @@ import { analyzeCommits, findingKey } from './commits.js';
 import { changedDeps, checkCves } from './deps.js';
 import { computeImpact } from './impact.js';
 import { buildReview, reviewStats, reviewChecklistItem, loadStore, saveStore } from './review.js';
-import { triage, impactReview, newUsage } from './ai.js';
+import { triage, impactReview, guidedReview, renderPack, newUsage } from './ai.js';
+import { distill, words } from './docs.js';
 import { loadConfig, DATA } from './config.js';
 
 export const PHASES = [['collect', 'Raccolta modifiche'], ['rules', 'Regole statiche'], ['cve', 'Verifica CVE'], ['commits', 'Analisi per commit'], ['review', 'Revisione riga per riga'], ['impact', 'Impatto sugli endpoint'], ['symbols', 'Simboli rimossi / firme'], ['ai', 'Revisione AI']];
 const SEV = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
 const ignored = (cfg, p) => cfg.analysis.ignorePaths.some((i) => p.includes(i));
 
-export async function analyze({ repo, branch, base, docs = [], useAI = true, onProgress = () => {} }) {
+export async function analyze({ repo, branch, base, docs = [], note = '', useAI = true, onProgress = () => {} }) {
   const cfg = loadConfig();
+  const dist = distill(docs); // regole del documento di analisi (locale, 0 token)
   if (!G.isGitRepo(repo)) throw new Error('La cartella non e\' un repository git');
   branch = G.safeRef(branch || (await G.listBranches(repo)).current);
   let detected = null;
@@ -169,7 +171,45 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
 
   /* --- AI (opzionale, a budget) --- */
   const aiInfo = { privacy: { sendCode: cfg.privacy.sendCode, redact: cfg.privacy.redactSecrets, offline: cfg.privacy.offline }, used: false, provider: cfg.ai.provider, model: cfg.ai.model, maxContextTokens: cfg.budget.maxContextTokens, monthlyLimit: cfg.budget.monthlyTokens, spent: 0, calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, skipped: 0, errors: [], note: '' };
-  if (aiReady) {
+  if (aiReady && cfg.budget.strategy === 'guided') {
+    /* UNA chiamata compatta guidata dal documento: BRIEF + regole pertinenti + una riga per modifica rischiosa */
+    const usage = newUsage(cfg); const byFid = new Map(findings.map((f) => [f.id, f]));
+    onProgress('ai', 'analisi guidata dal documento');
+    const TW = { critical: 100, high: 80, medium: 50, low: 20, info: 5, none: 0 };
+    const packOf = new Map(); for (const pk of impactPacks) for (const id of pk.itemIds) packOf.set(id, pk);
+    const groups = new Map(); const linked = new Set();
+    for (const it of review.items) {
+      if (it.state === 'superseded' || it.level === 'trivial') continue;
+      const tags = it.tags.filter((t) => t.sev !== 'none').sort((a, b) => SEV[b.sev] - SEV[a.sev]); const im = it.impact; const pk = packOf.get(it.id);
+      const key = pk ? pk.key : it.file + '|' + (im?.fn || it.newStart);
+      let g = groups.get(key);
+      if (!g) { g = { where: `${path.basename(it.file)}:${im?.fn || 'L' + (it.newStart || 1)}`, file: it.file, line: it.newStart, commit: it.commit, tags: [], itemIds: [], findingIds: [], priority: 0, route: '', idents: [], pack: pk }; groups.set(key, g); }
+      g.itemIds.push(it.id);
+      for (const t of tags) if (!g.tags.includes(t.id) && g.tags.length < 3) g.tags.push(t.id);
+      g.priority = Math.max(g.priority, tags[0] ? TW[tags[0].sev] : 0, im?.risk ? TW[im.risk] : 0);
+      if (im?.endpoints?.length && !g.route) { const e = im.endpoints[0]; g.route = `${e.chain.join('>')}=>${e.label}${im.endpoints.length > 1 ? '+' + (im.endpoints.length - 1) : ''}`; g.priority += Math.min(30, im.endpoints.length * 10); }
+      for (const f of findings) if (f.file === it.file && f.commit === it.commit && f.line >= it.newStart && f.line <= it.newStart + it.lines.length && !g.findingIds.includes(f.id)) { g.findingIds.push(f.id); linked.add(f.id); }
+      if (im?.findingId && !g.findingIds.includes(im.findingId)) { g.findingIds.push(im.findingId); linked.add(im.findingId); }
+      g.idents.push(...words(it.lines.filter((l) => l.k === '+').map((l) => l.t).join(' ')).slice(0, 8));
+    }
+    const changes = [...groups.values()].filter((g) => g.priority >= 20 || g.route).sort((a, b) => b.priority - a.priority).slice(0, 40);
+    for (const f of findings) if (f.rule.startsWith('REG-') && f.file && !linked.has(f.id) && f.rule !== 'REG-IMPACT' && SEV[f.severity] >= 3) changes.push({ where: `${path.basename(f.file)}:${(f.code || '').slice(0, 30)}`, file: f.file, line: f.line, commit: f.commit, tags: [f.rule.toLowerCase()], itemIds: [], findingIds: [f.id], priority: TW[f.severity], route: '', idents: words(f.message).slice(0, 8) });
+    changes.sort((a, b) => b.priority - a.priority); changes.forEach((c, i) => { c.id = 'C' + (i + 1); });
+    try {
+      const gr = await guidedReview(cfg, { rules: dist.rules, brief: note }, changes, usage, { render: async (pack, tokens) => renderPack(pack, tokens, false) });
+      aiInfo.errors.push(...gr.errors);
+      for (const c of changes) {
+        if (!gr.sent.has(c.id)) continue;
+        const v = gr.results.get(c.id); const verdict = v ? v.v : 'ok';
+        const rtexts = c.rules.map((id) => dist.rules.find((r) => r.id === id)).filter(Boolean);
+        for (const fid of c.findingIds) { const f = byFid.get(fid); if (f) { f.ai = verdict === 'risk' || verdict === 'viol' ? 'confermato' : verdict === 'unsure' ? 'incerto' : 'nessun problema segnalato'; f.aiNote = v?.why || ''; } }
+        for (const iid of c.itemIds) { const it = review.items.find((x) => x.id === iid); if (it) { it.ai = { v: verdict, why: v?.why || '', rules: c.rules }; if (it.impact) it.impact.ai = it.ai; } }
+        if (verdict === 'viol') add({ source: 'ai', rule: 'DOC-RULE', category: 'regression', severity: 'high', file: c.file, line: c.line, commit: c.commit, message: `Possibile violazione del documento (${c.rules.join(', ') || 'regole'}): ${rtexts[0]?.text || ''}${v?.why ? ' — ' + v.why : ''}`.slice(0, 400), ai: 'confermato' });
+        else if (verdict === 'risk' && !c.findingIds.length) add({ source: 'ai', rule: 'AI-IMPACT', category: 'regression', severity: 'medium', file: c.file, line: c.line, commit: c.commit, message: `Rischio segnalato dall'AI su «${c.where}»: ${v?.why || ''}`, ai: 'confermato' });
+      }
+      Object.assign(aiInfo, { used: gr.sent.size > 0 || usage.cached > 0, ...usage, skipped: gr.skipped, errors: aiInfo.errors, guided: { rulesTotal: dist.rules.length, rulesUsed: gr.rulesUsed.map((r) => ({ id: r.id, text: r.text })), brief: !!note.trim(), changes: changes.length, sent: gr.sent.size, rounds: gr.rounds } });
+    } catch (e) { aiInfo.errors.push(e.message); }
+  } else if (aiReady) {
     const usage = newUsage(cfg); const byFid = new Map(findings.map((f) => [f.id, f]));
     /* (a) Revisione d'impatto a CONTESTO CHIUSO: l'AI vede solo funzione modificata, metodi collegati, chiamanti diretti e percorso all'endpoint */
     const RW = { critical: 4, high: 3, medium: 2, low: 1 };
@@ -210,7 +250,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
       if (code.length > 12) items.push({ id: 'H' + ++hid, priority: score, text: `H${hid}|${path.basename(file)}:${h.newStart}|${code}`, file, line: h.newStart, code });
     }
     const kw = [...files.map((f) => path.basename(f.path).replace(/\.\w+$/, '')), ...commits.flatMap((c) => c.subject.split(/\W+/))];
-    const docsText = noCode ? '' : retrieveDocs(docs, kw, cfg.budget.docTokens);
+    const docsText = noCode ? '' : retrieveDocs([...docs, ...(note.trim() ? [{ name: 'note', text: note }] : [])], kw, cfg.budget.docTokens);
     try {
       const r = await triage(cfg, items, docsText, { snippet: (f, a, b) => G.showLines(repo, TO, f, a, b) }, usage);
       Object.assign(aiInfo, { used: true, ...r.usage, skipped: r.skipped + (aiInfo.impactSkipped || 0), errors: [...aiInfo.errors, ...r.errors] });
@@ -252,7 +292,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     createdAt: new Date().toISOString(), repo, branch, base, baseDetected: !!detected, mergeBase: mb, behind, dirty: dirty.length,
     summary: { impactedEndpoints: impact.endpoints.length, localChanges: wt, commits: commits.length, commitsAnalyzed: perCommit.analyzed, files: files.length, added: files.reduce((s, f) => s + f.add, 0), deleted: files.reduce((s, f) => s + f.del, 0), findings: findings.length, bySeverity: bySev,
       byStatus: files.reduce((o, f) => (o[f.status] = (o[f.status] || 0) + 1, o), {}) },
-    commits, files, findings, checklist, ai: aiInfo, deps, cve: cveInfo,
+    commits, files, findings, checklist, ai: aiInfo, deps, cve: cveInfo, docs: { names: docs.map((d) => d.name), rules: dist.rules.length, note: !!note.trim() },
     impact,
     review: { items: review.items, stats: reviewStats(review.items), resolved: review.resolved, truncated: review.truncated },
   };

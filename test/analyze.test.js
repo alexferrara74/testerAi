@@ -86,7 +86,7 @@ test('AI: quota mensile 2000 mai superata, cache e stop a quota esaurita', async
       res.end(JSON.stringify({ choices: [{ message: { content: '{"b":["F1"],"f":[],"a":[]}' } }], usage: { prompt_tokens: 150, completion_tokens: 10 } }));
     });
   }).listen(0);
-  saveConfig({ ai: { enabled: true, baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, model: 'm', apiKey: 'k' } });
+  saveConfig({ ai: { enabled: true, baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, model: 'm', apiKey: 'k' }, budget: { strategy: 'detailed', perAnalysisTokens: 400, maxContextTokens: 600, maxOutputTokens: 40, maxCalls: 3, docTokens: 60 } });
   const { readUsage } = await import('../src/usage.js');
   const docs = [{ name: 'rules', text: 'Vietato usare eval in util.\n\nAltro testo irrilevante qui.' }];
   const r = await analyze({ repo, branch: 'feature/x', useAI: true, docs });
@@ -250,7 +250,7 @@ test('AI sull\'impatto: contesto chiuso (solo funzione, callee, chiamanti, perco
     if (/Impact review/.test(sys)) { const ask = script.shift(); content = ask ? `{"v":"unsure","why":"serve il callee","ask":["${ask}"]}` : '{"v":"risk","why":"guardia rimossa: raggiungibile da POST /login","ask":[]}'; }
     res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 90, completion_tokens: 10 } })); }); }).listen(0);
   const reset = () => fs.writeFileSync(path.join(process.env.TESTERAI_DATA, 'usage.json'), '{}');
-  saveConfig({ ai: { enabled: true, provider: 'openai', baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, model: 'm', apiKey: 'k' }, budget: { monthlyTokens: 5000, perAnalysisTokens: 1500, maxContextTokens: 900, maxCalls: 6, maxRounds: 1, cache: false }, privacy: { offline: false, sendCode: true, redactSecrets: true } });
+  saveConfig({ ai: { enabled: true, provider: 'openai', baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, model: 'm', apiKey: 'k' }, budget: { strategy: 'detailed', monthlyTokens: 5000, perAnalysisTokens: 1500, maxContextTokens: 900, maxOutputTokens: 40, maxCalls: 6, maxRounds: 1, cache: false }, privacy: { offline: false, sendCode: true, redactSecrets: true } });
   reset();
   const rep = await analyze({ repo: r4, branch: 'feat', base: 'main', useAI: true });
   const imp = seen.filter((x) => /Impact review/.test(x.sys));
@@ -317,4 +317,49 @@ test('elenco modelli per provider (si sceglie, non si digita) e nessun auto-toke
   // il login locale di Copilot non viene piu' letto: senza apiKey errore esplicito
   await assert.rejects(listModels(set({ provider: 'copilot', baseUrl: root, copilotTokenUrl: root + '/copilot_internal/v2/token', apiKey: '' })), /campo API key/);
   srv.close();
+});
+
+test('analisi guidata dal documento: UNA chiamata compatta, solo regole pertinenti, PDF locale', async () => {
+  const { distill, pdfToText } = await import('../src/docs.js'); const zlib = await import('node:zlib');
+  // PDF minimo (stream compresso) con due requisiti
+  const content = 'BT /F1 12 Tf (Requisiti) Tj ET BT (Il login deve validare sempre lo user prima di emettere il token.) Tj ET BT [(Vietato rimuovere i controlli di accesso dagli endpoint.)] TJ ET';
+  const comp = zlib.deflateSync(Buffer.from(content));
+  const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n1 0 obj\n<< /Filter /FlateDecode >>\nstream\n'), comp, Buffer.from('\nendstream\nendobj\n%%EOF')]);
+  const pt = pdfToText(pdf); assert.match(pt.text, /login deve validare/); assert.equal(pt.warning, '');
+  assert.match(pdfToText(Buffer.from('%PDF-1.4 niente testo')).warning, /non leggibile/);
+  // distillazione: bullet/normative -> regole numerate; irrilevante scartato
+  const md = '# Requisiti login\n- Il login deve validare sempre lo user prima di emettere il token\n- Vietato rimuovere i controlli di accesso dagli endpoint\n\nParagrafo descrittivo senza regole che parla del colore del logo aziendale e basta.\n\n## Report\n- I report devono essere esportati in CSV';
+  const d = distill([{ name: 'req.md', text: md }]); assert.ok(d.rules.length >= 3 && d.rules[0].id === 'R1');
+  // repo + analisi guidata
+  const r5 = path.join(tmp, 'repo5'); fs.mkdirSync(r5);
+  const h = (...a) => execFileSync('git', a, { cwd: r5, stdio: 'pipe' }).toString();
+  const w = (f, t) => { fs.mkdirSync(path.dirname(path.join(r5, f)), { recursive: true }); fs.writeFileSync(path.join(r5, f), t); };
+  h('init', '-q', '-b', 'main'); h('config', 'user.email', 't@t'); h('config', 'user.name', 't');
+  w('src/validate.js', 'export function checkUser(u) {\n  if (!u || !u.id) throw new Error("bad user");\n  return true;\n}\n');
+  w('src/service.js', 'import { checkUser } from "./validate.js";\nexport function login(u) {\n  checkUser(u);\n  return "token";\n}\n');
+  w('src/routes.js', 'import { login } from "./service.js";\nrouter.post("/login", (req, res) => {\n  res.json(login(req.body));\n});\n');
+  w('src/csv.js', 'export function exportCsv(rows) {\n  return rows.join(",");\n}\n');
+  h('add', '.'); h('commit', '-qm', 'base'); h('checkout', '-qb', 'feat');
+  w('src/validate.js', 'export function checkUser(u) {\n  return true;\n}\n'); h('add', '.'); h('commit', '-qm', 'simplify');
+  const seen = [];
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => { const j = JSON.parse(b); seen.push({ sys: j.messages[0].content, usr: j.messages[1].content, max: j.max_tokens });
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: '{"r":[["C1","viol","R1 validazione rimossa dal login"]],"ask":[]}' } }], usage: { prompt_tokens: 260, completion_tokens: 30 } })); }); }).listen(0);
+  const reset = () => fs.writeFileSync(path.join(process.env.TESTERAI_DATA, 'usage.json'), '{}');
+  saveConfig({ ai: { enabled: true, provider: 'openai', baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, model: 'm', apiKey: 'k' }, budget: { strategy: 'guided', monthlyTokens: 2000, perAnalysisTokens: 500, maxContextTokens: 600, maxOutputTokens: 80, maxCalls: 2, maxRounds: 1, docTokens: 200, cache: false }, privacy: { offline: false, sendCode: true, sendDocs: true, redactSecrets: true } });
+  reset();
+  const rep = await analyze({ repo: r5, branch: 'feat', base: 'main', useAI: true, docs: [{ name: 'req.md', text: md }], note: 'Focus su sicurezza del login, ignora la formattazione.' });
+  assert.equal(seen.length, 1, 'UNA sola chiamata');
+  const u = seen[0].usr;
+  assert.match(u, /BRIEF Focus su sicurezza/); assert.match(u, /R1 .*login/i); assert.match(u, /C1\|validate\.js:checkUser\|.*\|checkUser>login=>POST \/login\|R/);
+  assert.ok(!/colore del logo|CSV|exportCsv/.test(u), 'regole/codice irrilevanti non inviati');
+  assert.ok(estimate(seen[0].sys + u) + seen[0].max <= 600, 'dentro il contesto');
+  assert.ok(rep.ai.spent <= 500 && rep.ai.calls === 1, JSON.stringify(rep.ai));
+  assert.ok(rep.findings.some((f) => f.rule === 'DOC-RULE' && /R1/.test(f.message)), 'violazione del documento');
+  assert.ok(rep.review.items.some((i) => i.ai?.v === 'viol'));
+  assert.ok(rep.ai.guided.rulesUsed.length >= 1 && rep.ai.guided.sent >= 1);
+  // follow-up: ask di un id non inviato -> ignorata; sendCode=false -> nessun codice
+  seen.length = 0; reset(); saveConfig({ privacy: { sendCode: false } });
+  await analyze({ repo: r5, branch: 'feat', base: 'main', useAI: true, docs: [{ name: 'req.md', text: md }], note: 'x' });
+  assert.ok(seen.length === 1 && !/return true|CHG|BODY/.test(seen[0].usr));
+  saveConfig({ privacy: { sendCode: true } }); srv.close();
 });

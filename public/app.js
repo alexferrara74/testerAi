@@ -61,11 +61,18 @@ $('base').onchange = () => { $('baseHint').textContent = ''; flow(); };
 
 /* ---------- documenti (drag & drop) ---------- */
 const drop = $('drop'); let docFiles = [];
-const showFiles = () => { $('fileList').innerHTML = docFiles.map((f, i) => `<span class="pill">📄 ${esc(f.name)} <a href="#" data-i="${i}" style="text-decoration:none;color:var(--mut)">✕</a></span>`).join(''); $('fileList').querySelectorAll('a').forEach((a) => a.onclick = (e) => { e.preventDefault(); docFiles.splice(+a.dataset.i, 1); showFiles(); }); };
+const b64 = async (f) => { const u8 = new Uint8Array(await f.arrayBuffer()); let bin = ''; for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(bin); };
+const readDoc = async (f) => (/\.pdf$/i.test(f.name) ? { name: f.name, b64: await b64(f) } : { name: f.name, text: await f.text() });
+async function previewDocs() {
+  if (!docFiles.length) { $('docPrev').textContent = ''; return; }
+  try { const r = await post('/api/docs/preview', { docs: await Promise.all(docFiles.map(readDoc)) });
+    $('docPrev').innerHTML = `📑 <b>${r.rules}</b> regole estratte in locale${r.sample.length ? ` · es.: <span class="mono">${esc(r.sample[0])}</span>` : ''}${r.warnings.map((w) => `<div style="color:var(--high)">⚠ ${esc(w)}</div>`).join('')}${r.rules === 0 && !r.warnings.length ? '<div style="color:var(--high)">⚠ Nessuna regola riconosciuta: usa elenchi puntati o frasi con «deve / vietato / must». Le «Informazioni aggiuntive» arrivano comunque all\'AI.</div>' : ''}`; } catch (e) { $('docPrev').textContent = e.message; }
+}
+const showFiles = () => { $('fileList').innerHTML = docFiles.map((f, i) => `<span class="pill">📄 ${esc(f.name)} <a href="#" data-i="${i}" style="text-decoration:none;color:var(--mut)">✕</a></span>`).join(''); $('fileList').querySelectorAll('a').forEach((a) => a.onclick = (e) => { e.preventDefault(); docFiles.splice(+a.dataset.i, 1); showFiles(); previewDocs(); }); };
 drop.onclick = () => $('docs').click();
-$('docs').onchange = () => { docFiles.push(...$('docs').files); showFiles(); };
+$('docs').onchange = () => { docFiles.push(...$('docs').files); showFiles(); previewDocs(); };
 drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); }; drop.ondragleave = () => drop.classList.remove('over');
-drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); docFiles.push(...e.dataTransfer.files); showFiles(); };
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); docFiles.push(...e.dataTransfer.files); showFiles(); previewDocs(); };
 
 /* ---------- avvio analisi ---------- */
 let PH = [['collect', 'Raccolta modifiche'], ['rules', 'Regole statiche'], ['cve', 'Verifica CVE'], ['commits', 'Analisi per commit'], ['review', 'Revisione riga per riga'], ['impact', 'Impatto sugli endpoint'], ['symbols', 'Simboli rimossi / firme'], ['ai', 'Revisione AI']], maxPh = 0, t0 = 0;
@@ -79,9 +86,8 @@ $('run').onclick = async () => {
   if (!$('path').value || !$('branch').value) return toast('Scegli prima repository e branch');
   $('run').disabled = true; maxPh = 0; t0 = Date.now(); drawProg({ phase: 'collect' });
   try {
-    const docs = []; for (const f of docFiles) docs.push({ name: f.name, text: await f.text() });
-    if ($('docsText').value.trim()) docs.push({ name: 'note', text: $('docsText').value });
-    const { job } = await post('/api/analyze', { path: $('path').value, branch: $('branch').value, base: $('base').value, docs, useAI: $('useAI').checked });
+    const docs = await Promise.all(docFiles.map(readDoc));
+    const { job } = await post('/api/analyze', { path: $('path').value, branch: $('branch').value, base: $('base').value, docs, note: $('docsText').value, useAI: $('useAI').checked });
     for (;;) {
       await new Promise((r) => setTimeout(r, 450));
       const j = await api('/api/jobs/' + job); drawProg(j);
@@ -147,7 +153,7 @@ function pOv() {
   <div class="grid g3">
    <div class="card"><h3>Per categoria</h3>${Object.entries(CATS).map(([k, n]) => `<div class="row" style="margin:6px 0"><span class="grow">${n}</span><b>${catN[k] || 0}</b></div>`).join('')}</div>
    <div class="card"><h3>Commit più rischiosi</h3>${topC.length ? topC.map((c) => `<div style="margin:6px 0"><span class="mono">${c.short}</span> ${esc(c.subject)} <span class="tag ${c.analysis.risk >= 8 ? 'critical' : c.analysis.risk >= 4 ? 'high' : 'medium'}">${c.analysis.risk}</span></div>`).join('') : '<div class="hint">Nessun commit a rischio 👍</div>'}</div>
-   <div class="card"><h3>Token AI</h3>${r.ai.used ? `<b style="font-size:24px">${r.ai.spent}</b> <span class="hint">spesi · mese ${r.ai.monthlyUsedBefore + r.ai.spent}/${r.ai.monthlyLimit}</span><div class="hint">${r.ai.calls} chiamate (${r.ai.cached} da cache) · ${r.ai.skipped} elementi non inviati${r.ai.impactReviewed ? ` · ${r.ai.impactReviewed} impatti valutati a contesto chiuso` : ''}</div>${r.ai.errors.length ? `<div class="hint" style="color:var(--high)">⚠ ${esc(r.ai.errors.join('; '))}</div>` : ''}` : `<b style="font-size:24px">0</b> <div class="hint">${esc(r.ai.note || 'AI non usata')}</div>`}</div>
+   <div class="card"><h3>Token AI</h3>${r.ai.used ? `<b style="font-size:24px">${r.ai.spent}</b> <span class="hint">spesi · mese ${r.ai.monthlyUsedBefore + r.ai.spent}/${r.ai.monthlyLimit}</span><div class="hint">${r.ai.calls} chiamate (${r.ai.cached} da cache) · ${r.ai.skipped} elementi non inviati${r.ai.guided ? ` · analisi guidata: ${r.ai.guided.sent}/${r.ai.guided.changes} modifiche, ${r.ai.guided.rulesUsed.length}/${r.ai.guided.rulesTotal} regole usate${r.ai.guided.brief ? ', note incluse' : ''}` : ''}${r.ai.impactReviewed ? ` · ${r.ai.impactReviewed} impatti valutati a contesto chiuso` : ''}</div>${r.ai.errors.length ? `<div class="hint" style="color:var(--high)">⚠ ${esc(r.ai.errors.join('; '))}</div>` : ''}` : `<b style="font-size:24px">0</b> <div class="hint">${esc(r.ai.note || 'AI non usata')}</div>`}</div>
   </div>
   <div class="card"><h3>Checklist · ${done}/${r.checklist.length} verificate</h3><div class="row">${r.checklist.map((c) => `<span class="ico ${c.status}" title="${esc(c.title)}">${ICON[c.status]}</span>`).join('')}</div></div>`;
 }
@@ -238,7 +244,7 @@ function impactBlock(i) {
   return `<div style="border:1px solid var(--bd);border-radius:10px;padding:8px 10px;background:var(--panel2)"><div class="row"><b>🧭 Impatto</b><span class="tag ${cls}">${m.risk}</span><span class="hint">${m.callers} punti di chiamata${m.fn ? ' di <span class="mono">' + esc(m.fn) + '</span>' : ''}</span></div>
    ${m.endpoints.length ? m.endpoints.slice(0, 4).map((e) => `<div class="mono" style="margin-top:4px">${e.chain.map(esc).join(' → ')} <b>⇒ ${esc(e.label)}</b></div>`).join('') : '<div class="hint">Nessun endpoint raggiunto (chiamanti interni o non risolvibili staticamente).</div>'}
    ${m.reasons.map((x) => `<div class="hint">• ${esc(x)}</div>`).join('')}
-   ${m.ai ? `<div style="margin-top:6px">🤖 <span class="tag ${m.ai.v === 'risk' ? 'high' : m.ai.v === 'ok' ? 'low' : 'medium'}">${m.ai.v === 'risk' ? 'rischio confermato' : m.ai.v === 'ok' ? 'nessun rischio' : 'incerto'}</span> <span class="hint">${esc(m.ai.why)}</span></div>` : ''}
+   ${m.ai && !i.ai ? `<div style="margin-top:6px">🤖 <span class="tag ${m.ai.v === 'risk' ? 'high' : m.ai.v === 'ok' ? 'low' : 'medium'}">${m.ai.v === 'risk' ? 'rischio confermato' : m.ai.v === 'ok' ? 'nessun rischio' : 'incerto'}</span> <span class="hint">${esc(m.ai.why)}</span></div>` : ''}
    ${m.untouched.length ? `<div class="hint">Chiamanti non toccati dal branch: <span class="mono">${m.untouched.slice(0, 4).map(esc).join(', ')}</span></div>` : ''}${m.tests.length ? `<div class="hint">Test: <span class="mono">${m.tests.slice(0, 3).map(esc).join(', ')}</span></div>` : ''}</div>`;
 }
 function item(i) {
@@ -247,6 +253,7 @@ function item(i) {
   return `<div class="item" style="border-left:3px solid ${stCls};padding-left:12px;margin:8px 0;flex-direction:column;gap:6px;background:${i.state === 'open' ? 'transparent' : 'var(--panel2)'}">
    <div class="row"><span class="tag ${cls}">${lvl}</span><span class="mono grow">${esc(i.fileStatus === 'D' ? '(eliminato) ' : '')}${esc(i.oldPath ? i.oldPath + ' → ' : '')}${esc(i.file)}${i.newStart ? ':' + i.newStart : ''}</span>
     ${i.state === 'aware' ? '<span class="pill" style="color:var(--ok)">✔ consapevole</span>' : i.state === 'fix' ? '<span class="pill" style="color:var(--high)">🔧 da fixare</span>' : ''}</div>
+   ${i.ai ? `<div>🤖 <span class="tag ${i.ai.v === 'viol' ? 'critical' : i.ai.v === 'risk' ? 'high' : i.ai.v === 'unsure' ? 'medium' : 'low'}">${{ viol: 'viola il documento', risk: 'rischio', unsure: 'incerto', ok: 'nessun problema' }[i.ai.v] || i.ai.v}</span> <span class="hint">${esc(i.ai.why || '')}${i.ai.rules?.length ? ' · ' + i.ai.rules.join(', ') : ''}</span></div>` : ''}
    ${impactBlock(i)}
    ${real.length ? `<div class="row">${real.map((t) => `<span class="tag ${t.sev}" title="${esc(t.hint)}">${esc(t.label)}</span>`).join('')}</div>${real.filter((t) => t.hint).slice(0, 3).map((t) => `<div class="hint">↳ ${esc(t.hint)}${t.detail ? ` <span class="mono">${esc(t.detail)}</span>` : ''}</div>`).join('')}` : `<div class="hint">${esc(i.tags[0]?.label || '')}</div>`}
    ${i.lines.length ? `<details ${open ? 'open' : ''}><summary class="hint">Righe modificate (${i.lines.length}${i.extra ? '+' + i.extra : ''})</summary><div class="diff mono" style="max-height:240px;margin-top:4px">${i.lines.map((l) => `<div class="${l.k === '+' ? 'p' : 'm'}"><span class="ln">${l.n}</span><span class="sg">${l.k}</span>${esc(l.t)}</div>`).join('')}</div></details>` : ''}
@@ -283,10 +290,10 @@ async function loadModels(silent) {
   } catch (e) { manualModel(e.message); if (!silent) toast('❌ ' + e.message); }
 }
 $('c_load').onclick = () => loadModels(false);
-const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'copilotTokenUrl', 'timeoutMs'], BF = ['monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
+const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'copilotTokenUrl', 'timeoutMs'], BF = ['strategy', 'monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
 async function loadCfg() {
   quota(); privacy(); const c = await api('/api/config'); manualModel('');
-  $('p_offline').checked = c.privacy.offline; $('p_sendCode').checked = c.privacy.sendCode; $('p_redact').checked = c.privacy.redactSecrets; $('p_http').checked = c.privacy.allowHttp; $('p_proxy').value = c.privacy.proxyUrl || ''; $('p_ca').value = c.privacy.caFile || '';
+  $('p_offline').checked = c.privacy.offline; $('p_sendDocs').checked = c.privacy.sendDocs; $('p_sendCode').checked = c.privacy.sendCode; $('p_redact').checked = c.privacy.redactSecrets; $('p_http').checked = c.privacy.allowHttp; $('p_proxy').value = c.privacy.proxyUrl || ''; $('p_ca').value = c.privacy.caFile || '';
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled;
   BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;
   if (c.ai.enabled && (c.ai.apiKey || c.ai.provider === 'ollama')) loadModels(true);
@@ -295,8 +302,8 @@ async function loadCfg() {
 $('save').onclick = async () => {
   try {
     const ai = { enabled: $('c_enabled').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value); ai.model = modelValue(); ai.timeoutMs = +ai.timeoutMs || 60000;
-    const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = +$('b_' + k).value);
-    await post('/api/config', { ai, budget, privacy: { offline: $('p_offline').checked, sendCode: $('p_sendCode').checked, redactSecrets: $('p_redact').checked, allowHttp: $('p_http').checked, proxyUrl: $('p_proxy').value, caFile: $('p_ca').value }, analysis: { includeWorktree: $('a_wt').checked, impact: { enabled: $('a_impOn').checked, maxDepth: +$('a_impDepth').value }, maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
+    const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = k === 'strategy' ? $('b_strategy').value : +$('b_' + k).value);
+    await post('/api/config', { ai, budget, privacy: { offline: $('p_offline').checked, sendDocs: $('p_sendDocs').checked, sendCode: $('p_sendCode').checked, redactSecrets: $('p_redact').checked, allowHttp: $('p_http').checked, proxyUrl: $('p_proxy').value, caFile: $('p_ca').value }, analysis: { includeWorktree: $('a_wt').checked, impact: { enabled: $('a_impOn').checked, maxDepth: +$('a_impDepth').value }, maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
     $('cmsg').textContent = 'Valori incoerenti riportati nei limiti: mese ≥ analisi ≥ chiamata'; toast('✔ Configurazione salvata'); loadCfg(); privacy();
   } catch (e) { toast('❌ ' + e.message); }
 };

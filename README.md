@@ -13,6 +13,14 @@ npm test
 3. **Report**: riepilogo, checklist (con spunte salvate), ogni file modificato con righe +/- rispetto alla base, commit, segnalazioni per categoria; export Markdown.
 4. **Configurazione AI**: provider (OpenAI-compatibile = Copilot/Azure/gateway aziendale, Anthropic, Ollama), URL, modello, key, header auth/extra, api-version e budget token. Test connessione incluso. La key può essere passata via `TESTERAI_API_KEY`.
 
+## Analisi guidata dal documento (poche centinaia di token)
+Carichi un **documento di analisi** (`.md`, `.txt`, **`.pdf`**: requisiti, linee guida, ADR) e/o scrivi nel box *«Informazioni aggiuntive»* cosa ti aspetti e cosa è critico. In locale (0 token):
+1. il documento viene ridotto a **regole numerate** (`R1…Rn`: elenchi puntati, frasi con «deve / vietato / must / never», criteri di accettazione) — il PDF è letto senza librerie (testo semplice; per scansioni/font incorporati esporta in `.md`/`.txt`; l'anteprima in pagina mostra subito cosa è stato estratto);
+2. le modifiche rischiose (con il percorso fino all'endpoint) diventano **una riga ciascuna**;
+3. ogni modifica viene collegata alle sole regole pertinenti (ranking per parole, tag e nomi).
+
+Poi parte **UNA sola chiamata** con `BRIEF` + `RULES` pertinenti + `CHANGES`; l'AI risponde con un JSON minimo, elencando **solo ciò che non è ok** (`risk` / `viol` = viola la regola Rn / `unsure`), citando la regola. Può chiedere contesto per **una** modifica già inviata (pacchetto a contesto chiuso, un solo approfondimento). Esempio reale di prompt: ~85 token di input + prompt di sistema ~60 + risposta ≤80 → circa 200–300 token per analisi (default: max 500/analisi, 2 chiamate). Una violazione diventa la segnalazione `DOC-RULE`; ogni voce di Revisione mostra il verdetto e le regole citate. Strategia alternativa «dettagliata» (impatto + triage, più chiamate) in Configurazione. Il documento non viene mai inviato per intero (opzione per non inviare nemmeno regole e note: «Consenti di inviare…» nella sezione Privacy).
+
 ## Collegare l'AI (Configurazione → Preset rapido)
 - **GitHub Copilot**: provider `copilot`. Scambia il tuo token GitHub (OAuth del login Copilot, `ghu_…`) con un token Copilot di breve durata (in cache) e chiama `api.githubcopilot.com` (Business/Enterprise: `api.business.` / `api.enterprise.githubcopilot.com`). Il token lo inserisci tu nel campo API key: **non viene mai letto in automatico dal PC**. Integrazione non ufficiale: verifica che policy e ToS aziendali la consentano.
 - **GitHub Models** (ufficiale): preset OpenAI-compatibile con un PAT con permesso `models:read`.

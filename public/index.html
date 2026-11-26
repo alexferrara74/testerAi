@@ -20,10 +20,12 @@
  <div class="card"><div class="step"><div class="n">2</div><div><h3>Branch</h3>
   <div class="grid g2"><div><label>Branch da analizzare</label><select id="branch"></select></div><div><label>Branch base (da cui hai staccato)</label><select id="base"></select></div></div>
   <div class="flow"><span class="pill ac" id="fBase">base</span><span class="arrow">←</span><span class="pill" id="fBranch">branch</span><span class="hint" id="baseHint"></span></div></div></div></div>
- <div class="card"><div class="step"><div class="n">3</div><div><h3>Contesto <span class="hint">(opzionale)</span></h3>
-  <div class="drop" id="drop">Trascina qui requisiti, linee guida, ADR… oppure clicca<input type="file" id="docs" multiple accept=".md,.txt,.rst,.json,.yml,.yaml" class="hide"></div>
-  <div class="files" id="fileList"></div>
-  <textarea id="docsText" rows="2" style="margin-top:10px" placeholder="…o incolla regole (es. «Vietato usare eval», «le API validano sempre l'input»). All'AI va solo il paragrafo pertinente."></textarea></div></div></div>
+ <div class="card"><div class="step"><div class="n">3</div><div><h3>Documento di analisi <span class="hint">(guida l'AI · opzionale)</span></h3>
+  <div class="drop" id="drop">Trascina qui un documento di analisi, requisiti o linee guida (.md, .txt, .pdf) oppure clicca<input type="file" id="docs" multiple accept=".md,.txt,.rst,.pdf,.json,.yml,.yaml" class="hide"></div>
+  <div class="files" id="fileList"></div><div class="hint" id="docPrev" style="margin-top:6px"></div>
+  <label>Informazioni aggiuntive per l'AI <span class="hint">(cosa ti aspetti, cosa è critico, cosa ignorare — poche righe)</span></label>
+  <textarea id="docsText" rows="3" placeholder="Es. «Il login deve restare retrocompatibile con l'app mobile v2. Attenzione ai permessi sul modulo fatture. Ignora le modifiche di formattazione.»"></textarea>
+  <div class="hint">Il documento resta sul tuo PC: viene ridotto in regole numerate e all'AI arrivano <b>solo le regole pertinenti alle modifiche rischiose</b>, in una sola chiamata compatta.</div></div></div></div>
  <div class="card row"><label class="chkl" style="margin:0"><input type="checkbox" id="useAI" checked> Usa AI per il triage finale</label><span class="hint grow" id="aiHint"></span><button class="btn p" id="run">▶ Analizza</button></div>
  <div class="prog" id="prog"></div>
 </section>
@@ -33,6 +35,7 @@
  <div class="card" style="border-color:var(--ok)"><h3>🔒 Privacy — il codice non esce dal tuo PC</h3>
   <p class="hint" style="margin-top:0">L'unica uscita di rete possibile è verso <b>l'AI che configuri qui sotto</b> (e, solo se la abiliti, verso OSV per le CVE: nomi e versioni dei pacchetti, mai codice). Ogni altra connessione è bloccata dal codice. Report, cache e chiavi stanno in <span class="mono" id="p_dir"></span>, fuori dal repository.</p>
   <label class="chkl"><input type="checkbox" id="p_offline"> Modalità offline: blocca TUTTE le connessioni (analisi solo statica, 0 token)</label>
+  <label class="chkl"><input type="checkbox" id="p_sendDocs"> Consenti di inviare all'AI le regole pertinenti del documento e le note del box (mai il documento intero)</label>
   <label class="chkl"><input type="checkbox" id="p_sendCode"> Consenti all'AI di ricevere frammenti di codice (se spento: solo nome file e tipo di segnalazione)</label>
   <label class="chkl"><input type="checkbox" id="p_redact"> Oscura chiavi, token, password, email e IP prima di ogni invio</label>
   <label class="chkl"><input type="checkbox" id="p_http"> Consenti http non cifrato verso host non locali (sconsigliato)</label>
@@ -47,7 +50,7 @@
   <label>Header extra (JSON)</label><input id="c_extraHeaders" placeholder='{"X-Team":"abc"}'><label class="chkl"><input type="checkbox" id="c_enabled"> AI abilitata</label></div>
  <div class="card"><h3>🪙 Quote token</h3>
   <div class="row"><span class="hint">Usati nel mese</span><input id="u_used" type="number" min="0" style="width:110px"><button class="btn" id="u_set">Aggiorna</button><button class="btn" id="u_reset">Azzera</button><span class="hint" id="quota"></span></div>
-  <div class="grid g3"><div><label>Quota mensile totale</label><input id="b_monthlyTokens" type="number"></div><div><label>Max per analisi</label><input id="b_perAnalysisTokens" type="number"></div><div><label>Max per chiamata</label><input id="b_maxContextTokens" type="number"></div>
+  <div class="grid g3"><div><label>Strategia AI</label><select id="b_strategy"><option value="guided">Guidata dal documento: 1 chiamata compatta (consigliata)</option><option value="detailed">Dettagliata: una chiamata per impatto + triage</option></select></div><div><label>Quota mensile totale</label><input id="b_monthlyTokens" type="number"></div><div><label>Max per analisi</label><input id="b_perAnalysisTokens" type="number"></div><div><label>Max per chiamata</label><input id="b_maxContextTokens" type="number"></div>
   <div><label>Output max</label><input id="b_maxOutputTokens" type="number"></div><div><label>Chiamate max</label><input id="b_maxCalls" type="number"></div><div><label>Round di domande</label><input id="b_maxRounds" type="number"></div><div><label>Token per i documenti</label><input id="b_docTokens" type="number"></div></div>
   <label class="chkl"><input type="checkbox" id="b_cache"> Cache risposte (0 token sui re-run identici)</label></div>
  <div class="card"><h3>📦 Analisi e CVE</h3><div class="grid g3"><div><label>Commit max analizzati</label><input id="a_maxCommits" type="number"></div><div><label>Voci di revisione max</label><input id="a_maxReview" type="number"></div><div><label>URL OSV (o mirror interno)</label><input id="a_osvUrl"></div><div><label>Cache CVE (ore)</label><input id="a_cacheHours" type="number"></div></div><label class="chkl"><input type="checkbox" id="a_wt"> Includi le modifiche locali non committate (solo sul branch attivo)</label><label class="chkl"><input type="checkbox" id="a_impOn"> Analisi d'impatto fino agli endpoint (0 token)</label><div style="max-width:200px"><label>Profondità massima chiamanti</label><input id="a_impDepth" type="number"></div><label class="chkl"><input type="checkbox" id="a_cveOn"> Verifica CVE abilitata (invia a OSV solo nome+versione dei pacchetti modificati; disattivata di default)</label></div>

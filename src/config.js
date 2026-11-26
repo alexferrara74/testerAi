@@ -24,17 +24,19 @@ export const DEFAULTS = {
     timeoutMs: 60000,
   },
   budget: {
+    strategy: 'guided',          // guided = UNA chiamata compatta guidata dal documento | detailed = una chiamata per impatto + triage
     monthlyTokens: 2000,         // TETTO MENSILE aziendale totale (input+output, tutte le analisi)
-    perAnalysisTokens: 400,      // quota massima spendibile da una singola analisi
+    perAnalysisTokens: 500,      // quota massima spendibile da una singola analisi (poche centinaia)
     maxContextTokens: 600,       // dimensione massima di una singola chiamata
-    maxOutputTokens: 40,         // risposta minima: solo id
-    maxCalls: 3,                 // chiamate AI max per analisi
-    maxRounds: 1,                // domande di approfondimento del modello per batch
-    docTokens: 60,               // quota di contesto riservata ai documenti in input
+    maxOutputTokens: 80,         // risposta minima: solo le modifiche NON ok
+    maxCalls: 2,                 // chiamate AI max per analisi (1 + un eventuale approfondimento)
+    maxRounds: 1,                // approfondimenti richiesti dal modello (su una modifica gia' inviata)
+    docTokens: 200,              // quota massima per regole del documento + note del box
     cache: true,
   },
   privacy: {
     offline: false,             // blocca QUALSIASI connessione in uscita (analisi solo statica)
+    sendDocs: true,             // consente di inviare all'AI le regole pertinenti del documento e le note del box (mai il documento intero)
     sendCode: true,             // false = all'AI vanno solo metadati, mai righe di codice
     redactSecrets: true,        // oscura chiavi/token/password/email/IP prima di ogni invio
     proxyUrl: '',               // proxy aziendale (es. http://utente:pwd@proxy:8080); vuoto = usa HTTPS_PROXY/HTTP_PROXY dell'ambiente
@@ -76,7 +78,8 @@ export function saveConfig(patch) {
   if (typeof next.ai.extraHeaders === 'string') { try { next.ai.extraHeaders = JSON.parse(next.ai.extraHeaders || '{}'); } catch { throw new Error('extraHeaders non e\' JSON valido'); } }
   next.privacy.proxyUrl = String(next.privacy.proxyUrl || '').trim(); next.privacy.caFile = String(next.privacy.caFile || '').trim();
   delete next.ai.copilotAutoToken; // rimosso: il token si inserisce solo a mano
-  for (const k of ['offline', 'sendCode', 'redactSecrets', 'allowHttp']) next.privacy[k] = !!next.privacy[k];
+  next.budget.strategy = next.budget.strategy === 'detailed' ? 'detailed' : 'guided';
+  for (const k of ['offline', 'sendDocs', 'sendCode', 'redactSecrets', 'allowHttp']) next.privacy[k] = !!next.privacy[k];
   next.analysis.cve.cacheHours = num(next.analysis.cve.cacheHours, 0, 720, 24);
   next.analysis.cve.timeoutMs = num(next.analysis.cve.timeoutMs, 1000, 60000, 10000);
   next.analysis.includeWorktree = !!next.analysis.includeWorktree; next.analysis.impact.enabled = !!next.analysis.impact.enabled;
@@ -85,12 +88,12 @@ export function saveConfig(patch) {
   next.analysis.maxCommits = num(next.analysis.maxCommits, 1, 1000, 100);
   const b = next.budget;
   b.monthlyTokens = num(b.monthlyTokens, 100, 1e9, 2000);
-  b.perAnalysisTokens = num(b.perAnalysisTokens, 50, b.monthlyTokens, 400);
+  b.perAnalysisTokens = num(b.perAnalysisTokens, 50, b.monthlyTokens, 500);
   b.maxContextTokens = num(b.maxContextTokens, 150, b.perAnalysisTokens, 600);
-  b.maxOutputTokens = num(b.maxOutputTokens, 10, Math.floor(b.maxContextTokens / 2), 40);
-  b.maxCalls = num(b.maxCalls, 1, 50, 3);
+  b.maxOutputTokens = num(b.maxOutputTokens, 10, Math.floor(b.maxContextTokens / 2), 80);
+  b.maxCalls = num(b.maxCalls, 1, 50, 2);
   b.maxRounds = num(b.maxRounds, 0, 3, 1);
-  b.docTokens = num(b.docTokens, 0, Math.floor(b.maxContextTokens / 3), 60);
+  b.docTokens = num(b.docTokens, 0, Math.floor(b.maxContextTokens / 2), 200);
   fs.mkdirSync(DATA, { recursive: true, mode: 0o700 });
   fs.writeFileSync(FILE, JSON.stringify(next, null, 2), { mode: 0o600 });
   return next;

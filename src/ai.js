@@ -6,6 +6,7 @@ import { estimate, fit } from './tokens.js';
 import { remaining, record, readUsage } from './usage.js';
 import { guardedFetch, redact } from './privacy.js';
 import { loadConfig } from './config.js';
+import { pickRules, briefText } from './docs.js';
 
 /* ---------------- GitHub Copilot: scambio token ---------------- */
 // Il token GitHub (OAuth Copilot) lo inserisci TU nel campo API key: non viene letto automaticamente dal PC.
@@ -241,4 +242,50 @@ export async function listModels(ai) {
   let list; try { list = parse(JSON.parse(raw)); } catch { throw Object.assign(new Error('Risposta non riconosciuta dall\'endpoint dei modelli'), { hint: 'Indica il modello a mano.' }); }
   const seen = new Set();
   return list.filter((m) => m.id && !seen.has(m.id) && seen.add(m.id)).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/* ============================================================================
+ * REVISIONE GUIDATA DAL DOCUMENTO: UNA chiamata compatta (poche centinaia di token).
+ * BRIEF (testo del box) + RULES (solo le regole del documento pertinenti) + CHANGES (una riga per modifica rischiosa,
+ * con percorso fino all'endpoint). L'AI elenca solo cio' che NON e' ok. Un solo follow-up opzionale su UNA modifica
+ * gia' inviata (contesto chiuso: pacchetto della funzione). Nulla fuori da questo perimetro.
+ * ============================================================================ */
+const SYSTEM_G = 'Review code CHANGES against BRIEF and RULES (ids Rn). JSON only, list ONLY non-ok changes: {"r":[[id,"risk|viol|unsure","max 12 words IT, cite Rn"]],"ask":[one id whose code you need]}. Unlisted = ok.';
+function parseGuided(text) {
+  const m = text.match(/\{[\s\S]*\}/); const e = { r: [], ask: [] }; if (!m) return e;
+  try {
+    const j = JSON.parse(m[0]); const arr = (x) => (Array.isArray(x) ? x : []);
+    return { r: arr(j.r ?? j.results).map((x) => (Array.isArray(x) ? { id: String(x[0]), v: String(x[1] || 'unsure'), why: String(x[2] || '').slice(0, 200) } : { id: String(x.id), v: String(x.v || 'unsure'), why: String(x.why || '').slice(0, 200) })).filter((x) => ['risk', 'viol', 'unsure'].includes(x.v)), ask: arr(j.ask ?? j.a).map(String).slice(0, 1) };
+  } catch { return e; }
+}
+export const changeLine = (c, withRules = true) => `${c.id}|${c.where}|${c.tags.join(',')}|${c.route || '-'}${withRules && c.rules?.length ? '|' + c.rules.join(',') : ''}`;
+
+/** rules: tutte le regole del documento; brief: testo del box; changes ordinate per priorita'. */
+export async function guidedReview(cfg, { rules, brief }, changes, usage, ctx) {
+  const { budget } = cfg; const res = { results: new Map(), sent: new Set(), skipped: changes.length, rulesUsed: [], errors: [], rounds: 0 };
+  const sysTokens = estimate(SYSTEM_G); const metaOnly = !cfg.privacy.sendCode; const docsOk = cfg.privacy.sendDocs !== false;
+  const room = () => Math.min(budget.maxContextTokens, leftTokens(cfg, usage)) - budget.maxOutputTokens - sysTokens - 8;
+  if (room() < 90) { res.errors.push(`Quota token troppo bassa per l'analisi guidata (residuo mese: ${remaining(budget.monthlyTokens)}, analisi: ${budget.perAnalysisTokens - usage.spent})`); return res; }
+  const ask = makeAsk(cfg, usage, SYSTEM_G, parseGuided);
+  const r0 = room();
+  const brf = docsOk ? briefText(brief, Math.min(budget.docTokens, Math.floor(r0 * 0.25))) : '';
+  const picked = docsOk ? pickRules(rules, changes, Math.min(budget.docTokens, Math.floor(r0 * 0.4))) : (changes.forEach((c) => { c.rules = []; }), []);
+  const head = (brf ? `BRIEF ${brf}\n` : '') + (picked.length ? 'RULES\n' + picked.map((r) => `${r.id} ${r.text}`).join('\n') + '\n' : '');
+  const lines = []; let used = estimate(head) + 3;
+  for (const c of changes) { const l = changeLine(c); const t = estimate(l) + 1; if (used + t > r0) continue; lines.push(l); res.sent.add(c.id); used += t; }
+  res.skipped = changes.length - res.sent.size; res.rulesUsed = picked.filter((r) => changes.some((c) => res.sent.has(c.id) && c.rules.includes(r.id)));
+  if (!lines.length) { res.errors.push('Nessuna modifica entra nel budget'); return res; }
+  try {
+    let p = await ask(head + 'CHANGES\n' + lines.join('\n'), 'guided');
+    if (!p) { res.errors.push('Quota o limite chiamate raggiunto prima della chiamata'); res.sent.clear(); res.skipped = changes.length; return res; }
+    for (const x of p.r) if (res.sent.has(x.id)) res.results.set(x.id, x);
+    for (let round = 0; round < budget.maxRounds && p.ask.length && !metaOnly && usage.calls < budget.maxCalls; round++) {
+      const id = p.ask[0]; const c = changes.find((x) => x.id === id); if (!c || !res.sent.has(id) || !c.pack || room() < 120) break; // fuori perimetro: ignorata
+      const rl = picked.filter((r) => c.rules.includes(r.id)).map((r) => `${r.id} ${r.text}`).join('\n');
+      const text = (rl ? 'RULES\n' + rl + '\n' : '') + 'CTX\n' + (await ctx.render(c.pack, Math.max(60, room() - estimate(rl) - estimate(changeLine(c)) - 12))) + '\nCHANGES\n' + changeLine(c);
+      const p2 = await ask(text, 'guided-ask'); res.rounds++; if (!p2) break;
+      res.results.delete(id); const x = p2.r.find((y) => y.id === id); if (x) res.results.set(id, x); else res.results.set(id, { id, v: 'ok', why: '' }); p = p2;
+    }
+  } catch (e) { res.errors.push(e.message); }
+  return res;
 }

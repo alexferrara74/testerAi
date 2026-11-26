@@ -9,6 +9,7 @@ import { analyze, PHASES, listReports, getReport, setChecked, setReviewState, to
 import { diagnose, listModels } from './ai.js';
 import { readUsage, setUsed } from './usage.js';
 import { allowedDestinations, readEgressLog } from './privacy.js';
+import { pdfToText, distill } from './docs.js';
 
 const PUB = path.join(ROOT, 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
@@ -22,6 +23,17 @@ const readBody = (req) => new Promise((ok, ko) => {
   let b = ''; req.on('data', (c) => { b += c; if (b.length > 8e6) { ko(new Error('payload troppo grande')); req.destroy(); } });
   req.on('end', () => { try { ok(b ? JSON.parse(b) : {}); } catch { ko(new Error('JSON non valido')); } });
 });
+// Documenti in ingresso: testo oppure PDF (base64) -> testo, tutto in locale.
+function prepDocs(list) {
+  const docs = [], warnings = [];
+  for (const d of (Array.isArray(list) ? list : []).slice(0, 20)) {
+    const name = String(d.name || 'doc').slice(0, 80); let text = '';
+    if (d.b64 || /\.pdf$/i.test(name)) { const r = pdfToText(Buffer.from(String(d.b64 || ''), 'base64')); text = r.text; if (r.warning) warnings.push(`${name}: ${r.warning}`); }
+    else text = String(d.text || '').slice(0, 400000);
+    if (text.trim()) docs.push({ name, text });
+  }
+  return { docs, warnings };
+}
 const repoOf = (p) => {
   const r = path.resolve(String(p || ''));
   if (!fs.existsSync(r) || !G.isGitRepo(r)) throw new Error('Non e\' un repository git: ' + r);
@@ -75,14 +87,18 @@ export function createServer() {
         const id = Math.random().toString(36).slice(2);
         const job = { status: 'running', phase: 'collect', detail: '', phases: PHASES, started: Date.now(), reportId: null, error: null };
         jobs.set(id, job);
-        const docs = (Array.isArray(b.docs) ? b.docs : []).slice(0, 20).map((d) => ({ name: String(d.name || 'doc').slice(0, 80), text: String(d.text || '').slice(0, 300000) }));
-        analyze({ repo, branch: b.branch, base: b.base, docs, useAI: b.useAI !== false, onProgress: (k, d) => { job.phase = k; job.detail = d || ''; } })
+        const { docs } = prepDocs(b.docs); const note = String(b.note || '').slice(0, 8000);
+        analyze({ repo, branch: b.branch, base: b.base, docs, note, useAI: b.useAI !== false, onProgress: (k, d) => { job.phase = k; job.detail = d || ''; } })
           .then((r) => { job.status = 'done'; job.reportId = r.id; }).catch((e) => { job.status = 'error'; job.error = e.message; });
         return send(res, 202, { job: id });
       }
       if (req.method === 'GET' && u.pathname.startsWith('/api/jobs/')) {
         const j = jobs.get(u.pathname.split('/').pop());
         return j ? send(res, 200, j) : send(res, 404, { error: 'job inesistente' });
+      }
+      if (req.method === 'POST' && u.pathname === '/api/docs/preview') { // anteprima locale: cosa verrebbe estratto (0 token, nessuna rete)
+        const b = await readBody(req); const { docs, warnings } = prepDocs(b.docs); const d = distill(docs);
+        return send(res, 200, { docs: docs.map((x) => x.name), rules: d.rules.length, sample: d.rules.slice(0, 6).map((r) => `${r.id} ${r.text}`), warnings });
       }
       if (req.method === 'GET' && u.pathname === '/api/reports') return send(res, 200, listReports());
       let m;
