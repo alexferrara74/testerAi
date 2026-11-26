@@ -42,6 +42,8 @@ export const DEFAULTS = {
   },
   analysis: {
     maxFilesDetail: 300,
+    includeWorktree: true,       // analizza anche le modifiche locali non committate (solo sul branch attivo)
+    impact: { enabled: true, maxDepth: 6, maxNodes: 150, maxItems: 80 }, // risalita chiamanti -> endpoint (0 token)
     maxCommits: 100,
     maxReviewItems: 500,
     cve: { enabled: false, osvUrl: 'https://api.osv.dev', cacheHours: 24, timeoutMs: 10000 },
@@ -75,6 +77,8 @@ export function saveConfig(patch) {
   for (const k of ['offline', 'sendCode', 'redactSecrets', 'allowHttp']) next.privacy[k] = !!next.privacy[k];
   next.analysis.cve.cacheHours = num(next.analysis.cve.cacheHours, 0, 720, 24);
   next.analysis.cve.timeoutMs = num(next.analysis.cve.timeoutMs, 1000, 60000, 10000);
+  next.analysis.includeWorktree = !!next.analysis.includeWorktree; next.analysis.impact.enabled = !!next.analysis.impact.enabled;
+  next.analysis.impact.maxDepth = num(next.analysis.impact.maxDepth, 1, 12, 6); next.analysis.impact.maxNodes = num(next.analysis.impact.maxNodes, 10, 1000, 150); next.analysis.impact.maxItems = num(next.analysis.impact.maxItems, 5, 500, 80);
   next.analysis.maxReviewItems = num(next.analysis.maxReviewItems, 20, 5000, 500);
   next.analysis.maxCommits = num(next.analysis.maxCommits, 1, 1000, 100);
   const b = next.budget;

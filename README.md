@@ -30,6 +30,12 @@ Il limite è un **contatore mensile persistente** (`~/.testerai/usage.json`, si 
 - **Cache** su disco: stessa richiesta = 0 token. Il test di connessione costa ~15 token e viene contato.
 - Disattiva "Usa AI" per un'analisi completamente gratuita.
 
+## Cosa viene analizzato (e cosa no)
+Solo i **commit del branch** (dal punto di stacco dal branch base) e le **modifiche locali non committate** («in pancia»: staged, unstaged e file nuovi, come voce `locale`, solo se sei sul branch analizzato). Il resto del codice non viene analizzato né inviato all'AI: viene solo *interrogato localmente* (`git grep`) per capire chi usa ciò che hai toccato.
+
+## Impatto fino all'endpoint (0 token)
+Per ogni modifica fatta in un punto **già esistente** il tool trova la funzione che la contiene, risale i chiamanti (fino a `maxDepth` livelli) e si ferma agli **endpoint**: route Express/Fastify/Koa, Flask/FastAPI, Spring, NestJS, Go (gin/net/http), file-route Next.js, eventi e job pianificati. Per ciascuno mostra la catena `funzione → … → POST /login`, i **chiamanti che il tuo branch non ha toccato** (rischio regressione), i test che nominano la funzione, e un livello di rischio che combina il tipo di modifica (controllo rimosso, operatore cambiato…) con quanti endpoint raggiunge. Le modifiche gravi che arrivano a un endpoint diventano segnalazioni `REG-IMPACT` (e voce di checklist). Limiti: analisi testuale, non risolve dispatch dinamico/DI/riflessione né il prefisso con cui un router è montato; i nomi troppo generici (`get`, `run`…) fanno risalita parziale (segnalato).
+
 ## Revisione riga per riga (checklist decisionale, 0 token)
 Ogni hunk di ogni commit diventa una voce della scheda **Revisione**, classificata staticamente:
 - **Logica inserita**: nuove condizioni, cicli, asincronia, gestione errori, I/O, accesso ai dati, sicurezza/autorizzazione, input non fidato, soglie/config, nuove funzioni.

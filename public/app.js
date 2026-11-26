@@ -110,7 +110,7 @@ const ICON = { pass: '✔', warn: '!', fail: '✕', manual: '👁' };
 async function showReport(id) { R = await api('/api/reports/' + id); tab = 'rv'; selFile = null; rvF = 'todo'; rvQ = ''; rvOpen = {}; fSev = fCat = fSt = 'all'; fQ = fFQ = ''; $('repList').innerHTML = ''; drawReport(); }
 function drawReport() {
   const r = R, s = r.summary, sc = score(s), done = r.checklist.filter((c) => c.checked).length;
-  const rs = r.review?.stats || { total: 0, toDecide: 0 }; const tabs = [['rv', 'Revisione', `${rs.total - rs.toDecide}/${rs.total}`], ['ov', 'Panoramica'], ['fl', 'Modifiche', s.files], ['cm', 'Commit', s.commits], ['fd', 'Segnalazioni', s.findings], ['dp', 'Dipendenze', (r.deps || []).length], ['ck', 'Checklist', `${done}/${r.checklist.length}`]];
+  const rs = r.review?.stats || { total: 0, toDecide: 0 }; const tabs = [['rv', 'Revisione', `${rs.total - rs.toDecide}/${rs.total}`], ['im', 'Impatto', (r.impact?.endpoints || []).length], ['ov', 'Panoramica'], ['fl', 'Modifiche', s.files], ['cm', 'Commit', s.commits], ['fd', 'Segnalazioni', s.findings], ['dp', 'Dipendenze', (r.deps || []).length], ['ck', 'Checklist', `${done}/${r.checklist.length}`]];
   $('rep').innerHTML = `
   <div class="row" style="margin-bottom:6px"><button class="btn" id="back">← Report</button><div class="grow"></div><button class="btn" id="copy">⧉ Copia link</button><a class="btn" href="/api/reports/${r.id}.md" download="report-${r.id}.md">⬇ Markdown</a></div>
   <h2><span class="pill ac" style="font-size:16px">${esc(r.base)}</span> ← ${esc(r.branch)}</h2>
@@ -120,7 +120,14 @@ function drawReport() {
   $('back').onclick = () => { $('rep').innerHTML = ''; loadList(); };
   $('copy').onclick = () => { navigator.clipboard?.writeText(location.origin + '/#' + r.id); toast('Link copiato'); };
   $('rep').querySelectorAll('.tab').forEach((t) => t.onclick = () => { tab = t.dataset.t; drawReport(); });
-  ({ rv: pReview, ov: pOv, fl: pFiles, cm: pCommits, fd: pFind, dp: pDeps, ck: pCheck })[tab]();
+  ({ rv: pReview, im: pImpact, ov: pOv, fl: pFiles, cm: pCommits, fd: pFind, dp: pDeps, ck: pCheck })[tab]();
+}
+function pImpact() {
+  const im = R.impact || { endpoints: [] }, eps = im.endpoints, RK = { critical: 'critical', high: 'high', medium: 'medium', low: 'low' };
+  $('pane').innerHTML = `<p class="hint">Per ogni modifica fatta in un punto <b>già esistente</b> si risalgono i chiamanti fino agli endpoint (HTTP, eventi, job). Analisi statica, 0 token · ${im.analyzed || 0} modifiche analizzate${im.error ? ' · ⚠ ' + esc(im.error) : ''}${im.disabled ? ' · <b>disattivata</b> in configurazione' : ''}</p>
+  ${eps.length ? eps.map((e) => `<div class="card"><div class="row"><span class="tag ${RK[e.risk]}">${e.risk}</span><b class="mono grow">${esc(e.label)}</b><span class="hint mono">${esc(e.file)}:${e.line}</span></div>
+   ${e.chains.map((c) => `<div class="row mono" style="margin:6px 0">${c.map((n, k) => `<span class="pill ${k === 0 ? 'ac' : ''}">${esc(n)}</span>${k < c.length - 1 ? '<span class="hint">→</span>' : ''}`).join('')}<span class="hint">⇒</span><span class="pill" style="border-color:var(--ac)">${esc(e.label)}</span></div>`).join('')}
+   <div class="hint">${e.items.length} modifiche coinvolte: ${e.items.map((id) => { const it = R.review.items.find((x) => x.id === id); return it ? `<span class="mono">${esc(it.file)}:${it.newStart || 1}</span> (${esc(it.commit)})` : id; }).join(', ')}</div></div>`).join('') : `<div class="card empty">${im.analyzed ? 'Nessuna delle modifiche in punti esistenti raggiunge un endpoint riconosciuto 👍<br><span class="hint">Riconosco route Express/Fastify/Koa, Flask/FastAPI, Spring, NestJS, Go, Next.js, eventi e job.</span>' : 'Nessuna modifica in punti esistenti da analizzare.'}</div>`}`;
 }
 function pOv() {
   const r = R, s = r.summary, sc = score(s), tot = Math.max(1, s.findings), done = r.checklist.filter((c) => c.checked).length;
@@ -223,12 +230,22 @@ function pReview() {
   if ($('rvCopy')) $('rvCopy').onclick = () => { navigator.clipboard?.writeText(fixes.map((i) => `- [ ] ${i.file}:${i.newStart} (${i.commit}) ${i.tags.filter((t) => t.sev !== 'none').map((t) => t.label).join('; ')}`).join('\n')); toast('TODO copiato'); };
   $('rvRe').onclick = async () => { $('rvRe').disabled = true; toast('Ri-analisi in corso…'); try { const { job } = await post('/api/analyze', { path: r.repo, branch: r.branch, base: r.base, useAI: false }); for (;;) { await new Promise((x) => setTimeout(x, 500)); const j = await api('/api/jobs/' + job); if (j.status === 'error') throw new Error(j.error); if (j.status === 'done') { await showReport(j.reportId); toast('Ri-analisi completata'); break; } } } catch (e) { toast('❌ ' + e.message); $('rvRe').disabled = false; } };
 }
+function impactBlock(i) {
+  const m = i.impact; if (!m) return '';
+  if (m.isNew || m.note) return `<div class="hint">🧭 ${esc(m.note || '')}</div>`;
+  const cls = { critical: 'critical', high: 'high', medium: 'medium', low: 'low' }[m.risk];
+  return `<div style="border:1px solid var(--bd);border-radius:10px;padding:8px 10px;background:var(--panel2)"><div class="row"><b>🧭 Impatto</b><span class="tag ${cls}">${m.risk}</span><span class="hint">${m.callers} punti di chiamata${m.fn ? ' di <span class="mono">' + esc(m.fn) + '</span>' : ''}</span></div>
+   ${m.endpoints.length ? m.endpoints.slice(0, 4).map((e) => `<div class="mono" style="margin-top:4px">${e.chain.map(esc).join(' → ')} <b>⇒ ${esc(e.label)}</b></div>`).join('') : '<div class="hint">Nessun endpoint raggiunto (chiamanti interni o non risolvibili staticamente).</div>'}
+   ${m.reasons.map((x) => `<div class="hint">• ${esc(x)}</div>`).join('')}
+   ${m.untouched.length ? `<div class="hint">Chiamanti non toccati dal branch: <span class="mono">${m.untouched.slice(0, 4).map(esc).join(', ')}</span></div>` : ''}${m.tests.length ? `<div class="hint">Test: <span class="mono">${m.tests.slice(0, 3).map(esc).join(', ')}</span></div>` : ''}</div>`;
+}
 function item(i) {
   const [lvl, cls] = LV[i.level], real = i.tags.filter((t) => t.sev !== 'none'), open = i.level !== 'trivial';
   const stCls = i.state === 'aware' ? 'var(--ok)' : i.state === 'fix' ? 'var(--high)' : 'var(--bd)';
   return `<div class="item" style="border-left:3px solid ${stCls};padding-left:12px;margin:8px 0;flex-direction:column;gap:6px;background:${i.state === 'open' ? 'transparent' : 'var(--panel2)'}">
    <div class="row"><span class="tag ${cls}">${lvl}</span><span class="mono grow">${esc(i.fileStatus === 'D' ? '(eliminato) ' : '')}${esc(i.oldPath ? i.oldPath + ' → ' : '')}${esc(i.file)}${i.newStart ? ':' + i.newStart : ''}</span>
     ${i.state === 'aware' ? '<span class="pill" style="color:var(--ok)">✔ consapevole</span>' : i.state === 'fix' ? '<span class="pill" style="color:var(--high)">🔧 da fixare</span>' : ''}</div>
+   ${impactBlock(i)}
    ${real.length ? `<div class="row">${real.map((t) => `<span class="tag ${t.sev}" title="${esc(t.hint)}">${esc(t.label)}</span>`).join('')}</div>${real.filter((t) => t.hint).slice(0, 3).map((t) => `<div class="hint">↳ ${esc(t.hint)}${t.detail ? ` <span class="mono">${esc(t.detail)}</span>` : ''}</div>`).join('')}` : `<div class="hint">${esc(i.tags[0]?.label || '')}</div>`}
    ${i.lines.length ? `<details ${open ? 'open' : ''}><summary class="hint">Righe modificate (${i.lines.length}${i.extra ? '+' + i.extra : ''})</summary><div class="diff mono" style="max-height:240px;margin-top:4px">${i.lines.map((l) => `<div class="${l.k === '+' ? 'p' : 'm'}"><span class="ln">${l.n}</span><span class="sg">${l.k}</span>${esc(l.t)}</div>`).join('')}</div></details>` : ''}
    <div class="row"><button class="btn" data-act="aware" data-k="${i.key}" style="padding:5px 12px">✔ Sono consapevole</button><button class="btn" data-act="fix" data-k="${i.key}" style="padding:5px 12px">🔧 Da fixare</button>${i.state !== 'open' ? `<button class="btn" data-act="open" data-k="${i.key}" style="padding:5px 12px">↺ Annulla</button>` : ''}</div></div>`;
@@ -251,13 +268,13 @@ async function loadCfg() {
   $('p_offline').checked = c.privacy.offline; $('p_sendCode').checked = c.privacy.sendCode; $('p_redact').checked = c.privacy.redactSecrets; $('p_http').checked = c.privacy.allowHttp;
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled; $('c_auto').checked = c.ai.copilotAutoToken;
   BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;
-  $('a_maxCommits').value = c.analysis.maxCommits; $('a_maxReview').value = c.analysis.maxReviewItems; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours;
+  $('a_maxCommits').value = c.analysis.maxCommits; $('a_wt').checked = c.analysis.includeWorktree; $('a_impOn').checked = c.analysis.impact.enabled; $('a_impDepth').value = c.analysis.impact.maxDepth; $('a_maxReview').value = c.analysis.maxReviewItems; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours;
 }
 $('save').onclick = async () => {
   try {
     const ai = { enabled: $('c_enabled').checked, copilotAutoToken: $('c_auto').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value); ai.timeoutMs = +ai.timeoutMs || 60000;
     const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = +$('b_' + k).value);
-    await post('/api/config', { ai, budget, privacy: { offline: $('p_offline').checked, sendCode: $('p_sendCode').checked, redactSecrets: $('p_redact').checked, allowHttp: $('p_http').checked }, analysis: { maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
+    await post('/api/config', { ai, budget, privacy: { offline: $('p_offline').checked, sendCode: $('p_sendCode').checked, redactSecrets: $('p_redact').checked, allowHttp: $('p_http').checked }, analysis: { includeWorktree: $('a_wt').checked, impact: { enabled: $('a_impOn').checked, maxDepth: +$('a_impDepth').value }, maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
     $('cmsg').textContent = 'Valori incoerenti riportati nei limiti: mese ≥ analisi ≥ chiamata'; toast('✔ Configurazione salvata'); loadCfg(); privacy();
   } catch (e) { toast('❌ ' + e.message); }
 };

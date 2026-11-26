@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { git, safeRef } from './git.js';
+import { readFileAt } from './git.js';
 import { DATA } from './config.js';
 import { guardedFetch } from './privacy.js';
 
 // Verifica CVE delle SOLE dipendenze aggiunte/cambiate nel branch (non l'intero albero) tramite OSV.dev.
 // Costo AI: 0 token. Risultati in cache su disco per ridurre le chiamate di rete.
 
-const show = (repo, ref, file) => git(repo, ['show', `${ref}:${file}`], { allowFail: true });
+const show = (repo, ref, file) => readFileAt(repo, ref, file);
 const dirOf = (f) => (f.includes('/') ? f.slice(0, f.lastIndexOf('/') + 1) : '');
 const cleanVer = (v) => (String(v).match(/\d+(?:\.\d+){0,3}(?:[-+][\w.]+)?/) || [''])[0];
 

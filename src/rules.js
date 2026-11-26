@@ -55,7 +55,7 @@ const DEF_RE = [
   /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*=>/,
   /^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)()/,
   /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(([^)]*)\)/,
-  /^\s*(?:public|private|protected|static|final|\s)+[\w<>\[\],?]+\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:throws [\w, ]+)?\s*\{?\s*$/,
+  /^\s*(?:public|private|protected|static|final|\s)+(?!(?:return|new|else|throw|await|yield|delete|typeof|case|in|of|do)\b)[\w<>\[\],?]+\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:throws [\w, ]+)?\s*\{?\s*$/,
   /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(([^)]*)\)/,
 ];
 export function defOf(line) {

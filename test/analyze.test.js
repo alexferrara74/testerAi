@@ -191,3 +191,41 @@ test('provider GitHub Copilot: scambio token poi chat, solo host configurati', a
   assert.equal(calls.filter((c) => c.url.includes('v2/token')).length, 1, 'token Copilot messo in cache');
   srv.close();
 });
+
+test('impatto: dalla modifica in un punto esistente risale fino all\'endpoint; modifiche locali incluse', async () => {
+  const r3 = path.join(tmp, 'repo3'); fs.mkdirSync(r3);
+  const h = (...a) => execFileSync('git', a, { cwd: r3, stdio: 'pipe' }).toString();
+  const w = (f, t) => { fs.mkdirSync(path.dirname(path.join(r3, f)), { recursive: true }); fs.writeFileSync(path.join(r3, f), t); };
+  h('init', '-q', '-b', 'main'); h('config', 'user.email', 't@t'); h('config', 'user.name', 't');
+  w('src/validate.js', 'export function checkUser(u) {\n  if (!u || !u.id) throw new Error("bad user");\n  return true;\n}\n');
+  w('src/service.js', 'import { checkUser } from "./validate.js";\nexport function login(u) {\n  checkUser(u);\n  return "token";\n}\n');
+  w('src/routes.js', 'import { login } from "./service.js";\nrouter.post("/login", (req, res) => {\n  res.json(login(req.body));\n});\n');
+  w('api/views.py', 'from helper import compute\n\n@app.route("/report", methods=["GET"])\ndef report():\n    return compute(1)\n');
+  w('api/helper.py', 'def compute(x):\n    if x < 10:\n        return x\n    return 10\n');
+  h('add', '.'); h('commit', '-qm', 'base'); h('checkout', '-qb', 'feat');
+  w('src/validate.js', 'export function checkUser(u) {\n  return true;\n}\n');
+  h('add', '.'); h('commit', '-qm', 'drop validation');
+  // modifica locale NON committata + file nuovo non tracciato
+  w('api/helper.py', 'def compute(x):\n    if x <= 10:\n        return x\n    return 10\n');
+  w('src/new.js', 'export const a = 1;\n');
+  const rep = await analyze({ repo: r3, branch: 'feat', base: 'main', useAI: false });
+  // 1) modifiche locali viste come pseudo-commit
+  assert.ok(rep.commits.some((c) => c.short === 'locale'), 'commit locale');
+  assert.ok(rep.files.some((f) => f.path === 'src/new.js' && f.status === 'A'), 'file non tracciato incluso');
+  // 2) catena fino all'endpoint HTTP (JS)
+  const ep = rep.impact.endpoints.find((e) => e.label === 'POST /login');
+  assert.ok(ep, JSON.stringify(rep.impact.endpoints.map((e) => e.label)));
+  assert.deepEqual(ep.chains[0].slice(0, 2), ['checkUser', 'login']);
+  const f = rep.findings.find((x) => x.rule === 'REG-IMPACT' && x.file === 'src/validate.js');
+  assert.ok(f && /POST \/login/.test(f.message), 'finding di impatto');
+  // 3) decoratore Python + modifica locale
+  assert.ok(rep.impact.endpoints.some((e) => /\/report/.test(e.label)), 'endpoint Python da modifica locale');
+  assert.ok(rep.review.items.some((i) => i.commit === 'locale' && i.impact?.endpoints?.length), 'voce locale con impatto');
+  assert.equal(rep.checklist.find((c) => c.id === 'c15').status, 'fail');
+  // 4) funzione nuova: nessun impatto da cercare
+  assert.match(toMarkdown(rep), /Impatto sugli endpoint/);
+  // senza modifiche locali il commit 'locale' sparisce
+  h('checkout', '--', 'api/helper.py'); fs.unlinkSync(path.join(r3, 'src/new.js'));
+  const rep2 = await analyze({ repo: r3, branch: 'feat', base: 'main', useAI: false });
+  assert.ok(!rep2.commits.some((c) => c.short === 'locale'));
+});

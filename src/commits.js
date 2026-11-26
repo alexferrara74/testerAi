@@ -11,7 +11,8 @@ export async function analyzeCommits(repo, commits, { ignored, max = 100 }) {
   const list = commits.slice(-max); // i piu' recenti
   for (let i = 0; i < list.length; i += 6) {
     await Promise.all(list.slice(i, i + 6).map(async (c) => {
-      const [st, diff] = await Promise.all([G.nameStatus(repo, `${c.hash}^`, c.hash), G.parseDiff(repo, `${c.hash}^`, c.hash)]);
+      const [from, to] = c.hash === G.WT ? ['HEAD', G.WT] : [`${c.hash}^`, c.hash];
+      const [st, diff] = await Promise.all([G.nameStatus(repo, from, to), G.parseDiff(repo, from, to)]);
       const findings = [];
       if (!c.merge) for (const [file, d] of diff) if (!ignored(file)) findings.push(...R.scanHunks(file, d.hunks));
       for (const s of st) {

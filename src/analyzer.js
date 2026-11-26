@@ -6,6 +6,7 @@ import * as R from './rules.js';
 import { retrieveDocs } from './tokens.js';
 import { analyzeCommits, findingKey } from './commits.js';
 import { changedDeps, checkCves } from './deps.js';
+import { computeImpact } from './impact.js';
 import { buildReview, reviewStats, reviewChecklistItem, loadStore, saveStore } from './review.js';
 import { triage } from './ai.js';
 import { loadConfig, DATA } from './config.js';
@@ -23,10 +24,19 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   const mb = await G.mergeBase(repo, base, branch);
   onProgress('Raccolta modifiche rispetto a ' + base);
 
-  const [commits, status, stats, diff, behind, dirty] = await Promise.all([
-    G.commitsBetween(repo, mb, branch), G.nameStatus(repo, mb, branch), G.numstat(repo, mb, branch),
-    G.parseDiff(repo, mb, branch), G.behindCount(repo, base, branch), G.dirtyFiles(repo),
+  // Solo i commit del branch (dal punto di stacco) + le modifiche locali non committate se sei su quel branch.
+  const dirty = await G.dirtyFiles(repo);
+  const wt = cfg.analysis.includeWorktree && dirty.length > 0 && (await G.currentBranch(repo)) === branch;
+  const TO = wt ? G.WT : branch; // stato "finale" analizzato
+  const [commits, status, stats, diff, behind] = await Promise.all([
+    G.commitsBetween(repo, mb, branch), G.nameStatus(repo, mb, TO), G.numstat(repo, mb, TO),
+    G.parseDiff(repo, mb, TO), G.behindCount(repo, base, branch),
   ]);
+  if (wt) {
+    const [wst, wns] = await Promise.all([G.nameStatus(repo, 'HEAD', G.WT), G.numstat(repo, 'HEAD', G.WT)]);
+    let a = 0, d = 0; for (const v of wns.values()) { a += v.add; d += v.del; }
+    commits.push({ hash: G.WT, short: 'locale', author: '(modifiche locali)', date: new Date().toISOString(), merge: false, subject: 'Modifiche locali non committate', files: wst.length, add: a, del: d });
+  }
 
   const findings = [];
   const add = (f) => findings.push({ id: 'F' + (findings.length + 1), source: 'rule', ...f });
@@ -74,7 +84,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   let deps = [], cveInfo = { checked: 0, error: null, disabled: !cfg.analysis.cve.enabled };
   if (cfg.analysis.cve.enabled && manifests.concat(locks).length) {
     onProgress('Verifica CVE delle dipendenze modificate');
-    deps = await changedDeps(repo, mb, branch, files.filter((f) => f.status !== 'D').map((f) => f.path));
+    deps = await changedDeps(repo, mb, TO, files.filter((f) => f.status !== 'D').map((f) => f.path));
     cveInfo = { ...cveInfo, ...(await checkCves(deps, cfg.analysis.cve)) };
     for (const d of deps) {
       if (!d.exact) add({ rule: 'DEP-UNPINNED', category: 'security', severity: 'low', file: d.file, message: `${d.name}: versione non bloccata (${d.to}~) senza lockfile: CVE verificate sulla base del range` });
@@ -114,6 +124,23 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     }
   }
 
+  /* --- impatto: dalle modifiche in punti esistenti risale i chiamanti fino agli endpoint (0 token) --- */
+  let impact = { endpoints: [], analyzed: 0, skipped: 0, disabled: !cfg.analysis.impact.enabled };
+  if (cfg.analysis.impact.enabled) {
+    onProgress('Impatto sugli endpoint');
+    const hashByShort = new Map(commits.map((c) => [c.short, c.hash]));
+    try {
+      impact = { ...impact, ...(await computeImpact({ repo, ref: TO, items: review.items, hashOf: (sh) => hashByShort.get(sh), changedFiles: new Set(files.map((f) => f.path)), cfg })) };
+    } catch (e) { impact.error = e.message; }
+    for (const it of review.items) {
+      const im = it.impact; if (!im || !im.risk || it.state === 'superseded') continue;
+      if (!(im.risk === 'high' || im.risk === 'critical' || (im.risk === 'medium' && it.tags.some((t) => t.id.startsWith('reg-'))))) continue;
+      const first = it.lines.find((l) => l.k === '+') || it.lines[0];
+      add({ rule: 'REG-IMPACT', category: 'regression', severity: im.risk, file: it.file, line: first?.n || it.newStart, commit: it.commit,
+        message: `Modifica in «${im.fn || it.file}» (${it.tags.filter((t) => t.sev !== 'none').slice(0, 2).map((t) => t.label).join('; ')}): ${im.reasons.join('; ')}`, code: (first?.t || '').trim().slice(0, 160) });
+    }
+  }
+
   /* --- regressioni: simboli rimossi/cambiati ancora usati --- */
   onProgress('Ricerca simboli rimossi o con firma cambiata');
   let symChecks = 0;
@@ -126,7 +153,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
       for (const [name, o] of rem) {
         if (symChecks++ > 40) break;
         const n = addd.get(name);
-        const refs = (await G.grepSymbol(repo, branch, name)).filter((p) => p !== file);
+        const refs = (await G.grepSymbol(repo, TO, name)).filter((p) => p !== file);
         if (!n) {
           const inSame = diff.get(file).hunks.some((hh) => hh !== h && hh.added.some((a) => R.defOf(a.t)?.name === name)); // spostato
           if (!inSame && refs.length) add({ rule: 'REG-REMOVED-SYMBOL', category: 'regression', severity: 'high', file, line: o.n, message: `Simbolo "${name}" rimosso ma ancora citato in ${refs.length} file (${refs.slice(0, 3).join(', ')})`, code: name });
@@ -149,7 +176,8 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     const cut = (x, n) => String(x || '').trim().replace(/\s+/g, ' ').slice(0, n);
     for (const f of findings) {
       if (CERTAIN.has(f.rule) || SEV[f.severity] < 3) continue;
-      if (f.code && f.line) items.push({ id: f.id, priority: 200 + SEV[f.severity], text: `${f.id}|${path.basename(f.file)}:${f.line}|${noCode ? f.rule : cut(f.code, 90)}` });
+      if (f.rule === 'REG-IMPACT') items.push({ id: f.id, priority: 160, text: `${f.id}|${path.basename(f.file)}|${cut(f.message, 100)}` });
+      else if (f.code && f.line) items.push({ id: f.id, priority: 200 + SEV[f.severity], text: `${f.id}|${path.basename(f.file)}:${f.line}|${noCode ? f.rule : cut(f.code, 90)}` });
       else if (f.rule.startsWith('REG-')) items.push({ id: f.id, priority: 150, text: `${f.id}|${path.basename(f.file)}|${noCode ? f.rule : cut(f.message, 90)}` });
     }
     const flagged = new Set(findings.map((f) => f.file));
@@ -165,7 +193,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     const kw = [...files.map((f) => path.basename(f.path).replace(/\.\w+$/, '')), ...commits.flatMap((c) => c.subject.split(/\W+/))];
     const docsText = noCode ? '' : retrieveDocs(docs, kw, cfg.budget.docTokens);
     try {
-      const r = await triage(cfg, items, docsText, { snippet: (f, a, b) => G.showLines(repo, branch, f, a, b) });
+      const r = await triage(cfg, items, docsText, { snippet: (f, a, b) => G.showLines(repo, TO, f, a, b) });
       Object.assign(aiInfo, { used: true, ...r.usage, skipped: r.skipped, errors: r.errors });
       for (const [id, why] of r.bug) {
         const f = byId.get(id);
@@ -192,8 +220,9 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     { id: 'c13', title: 'Nessuna CVE nelle dipendenze nuove/aggiornate', ...(() => { const v = has('DEP-CVE'); if (cveInfo.disabled) return { status: 'manual', detail: 'verifica CVE disattivata' }; if (cveInfo.error) return { status: 'warn', detail: cveInfo.error }; if (!deps.length) return { status: 'pass', detail: 'nessuna dipendenza modificata' }; return { status: v.length ? (v.some((f) => SEV[f.severity] >= 4) ? 'fail' : 'warn') : 'pass', detail: v.length ? `${v.length} vulnerabilita\' note: aggiornare alla versione corretta` : `${deps.length} dipendenze verificate su OSV` }; })(), checked: false },
     item('c8', 'Commit chiari e di dimensione ragionevole', has('GIT-MSG', 'GIT-BIG-COMMIT'), 'valutare squash/riscrittura messaggi'),
     { id: 'c9', title: `Branch aggiornato rispetto a ${base}`, status: behind ? 'warn' : 'pass', detail: behind ? `${behind} commit di ${base} non ancora integrati: rischio regressioni al merge` : 'allineato', checked: false },
-    { id: 'c10', title: 'Working tree pulito (nessuna modifica non committata)', status: dirty.length ? 'warn' : 'pass', detail: dirty.length ? `${dirty.length} file non committati: non analizzati` : 'pulito', checked: false },
+    { id: 'c10', title: 'Modifiche locali non committate', status: wt ? 'warn' : dirty.length ? 'warn' : 'pass', detail: wt ? `${dirty.length} file locali INCLUSI nell'analisi (voce «locale»): ricordati di committarli` : dirty.length ? `${dirty.length} file non committati su un altro branch: non analizzati` : 'nessuna modifica locale', checked: false },
     { ...reviewChecklistItem(reviewStats(review.items)), checked: false },
+    item('c15', 'Impatto sugli endpoint verificato (chiamanti non toccati, test nel percorso)', has('REG-IMPACT'), 'vedi scheda Impatto'),
     { id: 'c11', title: 'Revisione AI completata', status: aiInfo.used ? (aiInfo.skipped || aiInfo.errors.length ? 'warn' : 'pass') : 'manual', detail: aiInfo.used ? `${aiInfo.calls} chiamate, ${aiInfo.spent} token spesi, ${aiInfo.skipped} elementi non inviati per budget` : aiInfo.note, checked: false },
   ];
 
@@ -201,9 +230,10 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   const report = {
     id: new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14) + '-' + crypto.randomBytes(2).toString('hex'),
     createdAt: new Date().toISOString(), repo, branch, base, baseDetected: !!detected, mergeBase: mb, behind, dirty: dirty.length,
-    summary: { commits: commits.length, commitsAnalyzed: perCommit.analyzed, files: files.length, added: files.reduce((s, f) => s + f.add, 0), deleted: files.reduce((s, f) => s + f.del, 0), findings: findings.length, bySeverity: bySev,
+    summary: { impactedEndpoints: impact.endpoints.length, localChanges: wt, commits: commits.length, commitsAnalyzed: perCommit.analyzed, files: files.length, added: files.reduce((s, f) => s + f.add, 0), deleted: files.reduce((s, f) => s + f.del, 0), findings: findings.length, bySeverity: bySev,
       byStatus: files.reduce((o, f) => (o[f.status] = (o[f.status] || 0) + 1, o), {}) },
     commits, files, findings, checklist, ai: aiInfo, deps, cve: cveInfo,
+    impact,
     review: { items: review.items, stats: reviewStats(review.items), resolved: review.resolved, truncated: review.truncated },
   };
   fs.mkdirSync(path.join(DATA, 'reports'), { recursive: true });
@@ -247,6 +277,10 @@ export function toMarkdown(r) {
     `- Commit: ${r.summary.commits} · File: ${r.summary.files} · +${r.summary.added}/-${r.summary.deleted}`, `- Segnalazioni: ${r.summary.findings} ${JSON.stringify(r.summary.bySeverity)}`,
     `- AI: ${r.ai.used ? `${r.ai.calls} chiamate (${r.ai.cached} da cache), ${r.ai.spent} token spesi (quota mensile ${r.ai.monthlyUsedBefore + r.ai.spent}/${r.ai.monthlyLimit}), non inviati ${r.ai.skipped}` : r.ai.note}`, '', '## Checklist');
   for (const c of r.checklist) L.push(`- [${c.checked ? 'x' : ' '}] ${{ pass: '✅', warn: '⚠️', fail: '❌', manual: '👁️' }[c.status]} **${c.title}** — ${c.detail}`);
+  if (r.impact?.endpoints?.length) {
+    L.push('', '## Impatto sugli endpoint', '');
+    for (const e of r.impact.endpoints) L.push(`- **${e.risk.toUpperCase()}** ${e.label} (\`${e.file}:${e.line}\`) ← ${e.chains.map((c) => c.join(' → ')).join(' | ')}`);
+  }
   if (r.review) {
     const st = r.review.stats;
     L.push('', '## Revisione modifiche', '', `${st.total - st.toDecide}/${st.total} decise · ${st.aware} consapevoli · ${st.fix} da fixare · ${st.blocking} problemi bloccanti · ${st.superseded} riscritte in commit successivi`);

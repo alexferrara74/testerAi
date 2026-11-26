@@ -5,6 +5,11 @@ import path from 'node:path';
 
 const pexec = promisify(execFile);
 
+// 'to' speciale: working tree (modifiche locali non committate, staged+unstaged+file nuovi)
+export const WT = 'WORKTREE';
+const range = (from, to) => (to === WT ? [from] : [from, to]);
+const MAX_UNTRACKED = 1024 * 1024;
+
 export async function git(cwd, args, { allowFail = false } = {}) {
   try {
     const { stdout } = await pexec('git', ['-c', 'core.quotepath=off', ...args], {
@@ -83,8 +88,22 @@ export async function commitsBetween(repo, mb, branch) {
   return commits;
 }
 
+export async function untracked(repo) {
+  const out = await git(repo, ['ls-files', '--others', '--exclude-standard', '-z'], { allowFail: true });
+  const files = [];
+  for (const p of out.split('\0').filter(Boolean)) {
+    try {
+      const abs = path.join(repo, p); const st = fs.statSync(abs);
+      if (!st.isFile() || st.size > MAX_UNTRACKED) continue;
+      const buf = fs.readFileSync(abs); if (buf.includes(0)) continue; // binario
+      files.push({ path: p, lines: buf.toString('utf8').split('\n').filter((l, i, a) => !(i === a.length - 1 && l === '')) });
+    } catch { /* ignora */ }
+  }
+  return files;
+}
+
 export async function nameStatus(repo, mb, branch) {
-  const out = await git(repo, ['diff', '--name-status', '-M', '-z', mb, branch]);
+  const out = await git(repo, ['diff', '--name-status', '-M', '-z', ...range(mb, branch)]);
   const parts = out.split('\0').filter((x) => x !== '');
   const files = [];
   for (let i = 0; i < parts.length;) {
@@ -92,12 +111,14 @@ export async function nameStatus(repo, mb, branch) {
     if (st[0] === 'R' || st[0] === 'C') files.push({ status: st[0], oldPath: parts[i++], path: parts[i++] });
     else files.push({ status: st[0], path: parts[i++] });
   }
+  if (branch === WT) for (const u of await untracked(repo)) files.push({ status: 'A', path: u.path });
   return files;
 }
 
 export async function numstat(repo, mb, branch) {
-  const out = await git(repo, ['diff', '--numstat', '-M', '-z', mb, branch]);
+  const out = await git(repo, ['diff', '--numstat', '-M', '-z', ...range(mb, branch)]);
   const map = new Map();
+  if (branch === WT) for (const u of await untracked(repo)) map.set(u.path, { add: u.lines.length, del: 0, binary: false });
   const parts = out.split('\0');
   for (let i = 0; i < parts.length; i++) {
     const m = parts[i].match(/^(\d+|-)\t(\d+|-)\t(.*)$/);
@@ -111,8 +132,9 @@ export async function numstat(repo, mb, branch) {
 
 /** Diff unificato a 0 righe di contesto, parsato in hunk con numeri di riga. */
 export async function parseDiff(repo, mb, branch) {
-  const out = await git(repo, ['diff', '-U0', '--no-color', '-M', mb, branch]);
+  const out = await git(repo, ['diff', '-U0', '--no-color', '-M', ...range(mb, branch)]);
   const files = new Map();
+  if (branch === WT) for (const u of await untracked(repo)) files.set(u.path, { path: u.path, hunks: [{ newStart: 1, oldStart: 0, added: u.lines.map((t, i) => ({ n: i + 1, t })), removed: [] }] });
   let cur = null, hunk = null, oldNo = 0, newNo = 0;
   for (const line of out.split('\n')) {
     if (line.startsWith('diff --git ')) { cur = null; hunk = null; continue; }
@@ -134,15 +156,35 @@ export async function parseDiff(repo, mb, branch) {
   return files;
 }
 
+/** Contenuto di un file a un ref (o nel working tree). */
+export async function readFileAt(repo, ref, file) {
+  if (ref === WT) { try { const abs = path.resolve(repo, file); if (!abs.startsWith(path.resolve(repo) + path.sep)) return ''; return fs.readFileSync(abs, 'utf8'); } catch { return ''; } }
+  return git(repo, ['show', `${safeRef(ref)}:${file}`], { allowFail: true });
+}
+
 export async function showLines(repo, ref, file, from, to) {
-  const out = await git(repo, ['show', `${safeRef(ref)}:${file}`], { allowFail: true });
+  const out = await readFileAt(repo, ref, file);
   return out.split('\n').slice(Math.max(0, from - 1), to).map((t, i) => `${from + i}:${t}`);
 }
 
 export async function grepSymbol(repo, ref, symbol) {
-  const out = await git(repo, ['grep', '-lwI', '-e', symbol, safeRef(ref), '--'], { allowFail: true });
-  return out.split('\n').filter(Boolean).map((l) => l.slice(l.indexOf(':') + 1));
+  const out = ref === WT ? await git(repo, ['grep', '-lwI', '--untracked', '-e', symbol, '--'], { allowFail: true }) : await git(repo, ['grep', '-lwI', '-e', symbol, safeRef(ref), '--'], { allowFail: true });
+  return out.split('\n').filter(Boolean).map((l) => (ref === WT ? l : l.slice(l.indexOf(':') + 1)));
 }
+
+/** Occorrenze (file, riga, testo) di un simbolo come parola intera. */
+export async function grepLines(repo, ref, symbol, cap = 400) {
+  const out = ref === WT ? await git(repo, ['grep', '-nwI', '--untracked', '-e', symbol, '--'], { allowFail: true }) : await git(repo, ['grep', '-nwI', '-e', symbol, safeRef(ref), '--'], { allowFail: true });
+  const hits = [];
+  for (const l of out.split('\n')) {
+    if (!l) continue;
+    const m = (ref === WT ? l : l.slice(ref.length + 1)).match(/^(.*?):(\d+):(.*)$/); if (!m) continue;
+    hits.push({ file: m[1], line: +m[2], text: m[3] }); if (hits.length >= cap) break;
+  }
+  return hits;
+}
+
+export async function currentBranch(repo) { return (await git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFail: true })).trim(); }
 
 export async function behindCount(repo, base, branch) {
   return parseInt((await git(repo, ['rev-list', '--count', `${safeRef(branch)}..${safeRef(base)}`], { allowFail: true })).trim() || '0', 10);
