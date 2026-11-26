@@ -26,7 +26,7 @@ quota();
 async function privacy() {
   try { const p = await api('/api/privacy'); const d = p.destinations;
     $('netTxt').innerHTML = p.offline ? 'Offline: nessuna connessione' : d.length ? d.map((x) => `${x.purpose.toUpperCase()} → ${esc(x.host)}`).join('<br>') : 'Nessuna uscita attiva';
-    if ($('p_dir')) { $('p_dir').textContent = p.dataDir;
+    if ($('p_dir')) { $('p_dir').textContent = p.dataDir; $('p_env').textContent = [p.proxyEnv ? 'Proxy da ambiente: ' + p.proxyEnv : 'Nessun proxy nell\'ambiente', p.caEnv ? 'CA extra: ' + p.caEnv : ''].filter(Boolean).join(' · ');
       $('p_dest').innerHTML = '<b>Destinazioni consentite ora</b>' + (p.offline ? '<div class="hint">nessuna (offline)</div>' : d.map((x) => `<div class="hint">• <b>${esc(x.host)}</b> (${x.purpose}) — invia: ${esc(x.sends)}</div>`).join('') || '<div class="hint">nessuna</div>');
       $('p_log').innerHTML = p.log.map((e) => `<div>${esc(e.t.slice(11, 19))} ${esc(e.purpose)} ${esc(e.host)}${esc(e.path || '')} ${e.blocked ? '<span style="color:var(--crit)">BLOCCATA: ' + esc(e.blocked) + '</span>' : e.bytes + ' B → ' + e.status}</div>`).join('') || '<span class="hint">nessuna connessione registrata</span>'; } } catch {}
 }
@@ -68,24 +68,25 @@ drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); }; dr
 drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); docFiles.push(...e.dataTransfer.files); showFiles(); };
 
 /* ---------- avvio analisi ---------- */
-const STEPS = ['Raccolta modifiche', 'Scansione regole', 'Verifica CVE', 'Analisi per commit', 'Simboli rimossi', 'Triage AI'];
-const stepOf = (m) => STEPS.findIndex((s) => m.toLowerCase().includes(s.split(' ')[0].toLowerCase()) || (s === 'Analisi per commit' && /commit/i.test(m)) || (s === 'Simboli rimossi' && /simbol/i.test(m)));
-function drawProg(msg, done) {
-  const i = done ? STEPS.length : stepOf(msg);
-  $('prog').innerHTML = `<div class="card">${STEPS.map((s, k) => `<div class="${k < i ? 'done' : k === i ? 'now' : ''}">${k < i ? '✔' : k === i ? '<span class="spin"></span>' : '○'} ${s}</div>`).join('')}</div>`;
+let PH = [['collect', 'Raccolta modifiche'], ['rules', 'Regole statiche'], ['cve', 'Verifica CVE'], ['commits', 'Analisi per commit'], ['review', 'Revisione riga per riga'], ['impact', 'Impatto sugli endpoint'], ['symbols', 'Simboli rimossi / firme'], ['ai', 'Revisione AI']], maxPh = 0, t0 = 0;
+function drawProg(j, done) {
+  if (j?.phases) PH = j.phases;
+  const cur = done ? PH.length : Math.max(maxPh, PH.findIndex((p) => p[0] === j?.phase)); maxPh = Math.max(maxPh, cur < 0 ? 0 : cur); // mai indietro: l'elenco non sparisce
+  const sec = Math.round((Date.now() - t0) / 1000);
+  $('prog').innerHTML = `<div class="card">${PH.map(([k, n], i) => `<div class="${i < maxPh ? 'done' : i === maxPh ? 'now' : ''}">${i < maxPh ? '✔' : i === maxPh ? '<span class="spin"></span>' : '○'} ${esc(n)}${i === maxPh && j?.detail ? ` <span class="hint">· ${esc(j.detail)}</span>` : ''}</div>`).join('')}<div class="hint" style="margin-top:8px">⏱ ${sec}s${sec > 20 ? ' · repository grande: la risalita dei chiamanti può richiedere un po\'' : ''}</div></div>`;
 }
 $('run').onclick = async () => {
   if (!$('path').value || !$('branch').value) return toast('Scegli prima repository e branch');
-  $('run').disabled = true; drawProg('Raccolta');
+  $('run').disabled = true; maxPh = 0; t0 = Date.now(); drawProg({ phase: 'collect' });
   try {
     const docs = []; for (const f of docFiles) docs.push({ name: f.name, text: await f.text() });
     if ($('docsText').value.trim()) docs.push({ name: 'note', text: $('docsText').value });
     const { job } = await post('/api/analyze', { path: $('path').value, branch: $('branch').value, base: $('base').value, docs, useAI: $('useAI').checked });
     for (;;) {
       await new Promise((r) => setTimeout(r, 450));
-      const j = await api('/api/jobs/' + job); drawProg(j.progress);
+      const j = await api('/api/jobs/' + job); drawProg(j);
       if (j.status === 'error') throw new Error(j.error);
-      if (j.status === 'done') { drawProg('', true); quota(); await new Promise((r) => setTimeout(r, 350)); $('prog').innerHTML = ''; $('rep').innerHTML = ' '; view('rep'); showReport(j.reportId); break; }
+      if (j.status === 'done') { drawProg(null, true); quota(); await new Promise((r) => setTimeout(r, 350)); $('prog').innerHTML = ''; $('rep').innerHTML = ' '; view('rep'); showReport(j.reportId); break; }
     }
   } catch (e) { $('prog').innerHTML = ''; toast('❌ ' + e.message); } finally { $('run').disabled = false; }
 };
@@ -266,7 +267,7 @@ fetch('/api/copilot/detect').then((r) => r.json()).then((d) => { $('c_autoHint')
 const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'timeoutMs'], BF = ['monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
 async function loadCfg() {
   quota(); privacy(); const c = await api('/api/config');
-  $('p_offline').checked = c.privacy.offline; $('p_sendCode').checked = c.privacy.sendCode; $('p_redact').checked = c.privacy.redactSecrets; $('p_http').checked = c.privacy.allowHttp;
+  $('p_offline').checked = c.privacy.offline; $('p_sendCode').checked = c.privacy.sendCode; $('p_redact').checked = c.privacy.redactSecrets; $('p_http').checked = c.privacy.allowHttp; $('p_proxy').value = c.privacy.proxyUrl || ''; $('p_ca').value = c.privacy.caFile || '';
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled; $('c_auto').checked = c.ai.copilotAutoToken;
   BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;
   $('a_maxCommits').value = c.analysis.maxCommits; $('a_wt').checked = c.analysis.includeWorktree; $('a_impOn').checked = c.analysis.impact.enabled; $('a_impDepth').value = c.analysis.impact.maxDepth; $('a_maxReview').value = c.analysis.maxReviewItems; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours;
@@ -275,10 +276,17 @@ $('save').onclick = async () => {
   try {
     const ai = { enabled: $('c_enabled').checked, copilotAutoToken: $('c_auto').checked, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value); ai.timeoutMs = +ai.timeoutMs || 60000;
     const budget = { cache: $('b_cache').checked }; BF.forEach((k) => budget[k] = +$('b_' + k).value);
-    await post('/api/config', { ai, budget, privacy: { offline: $('p_offline').checked, sendCode: $('p_sendCode').checked, redactSecrets: $('p_redact').checked, allowHttp: $('p_http').checked }, analysis: { includeWorktree: $('a_wt').checked, impact: { enabled: $('a_impOn').checked, maxDepth: +$('a_impDepth').value }, maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
+    await post('/api/config', { ai, budget, privacy: { offline: $('p_offline').checked, sendCode: $('p_sendCode').checked, redactSecrets: $('p_redact').checked, allowHttp: $('p_http').checked, proxyUrl: $('p_proxy').value, caFile: $('p_ca').value }, analysis: { includeWorktree: $('a_wt').checked, impact: { enabled: $('a_impOn').checked, maxDepth: +$('a_impDepth').value }, maxCommits: +$('a_maxCommits').value, maxReviewItems: +$('a_maxReview').value, cve: { enabled: $('a_cveOn').checked, osvUrl: $('a_osvUrl').value, cacheHours: +$('a_cacheHours').value } } }, 'PUT');
     $('cmsg').textContent = 'Valori incoerenti riportati nei limiti: mese ≥ analisi ≥ chiamata'; toast('✔ Configurazione salvata'); loadCfg(); privacy();
   } catch (e) { toast('❌ ' + e.message); }
 };
-$('test').onclick = async () => { $('cmsg').textContent = 'test…'; try { const r = await post('/api/config/test', {}); $('cmsg').textContent = ''; toast('✔ Connessione ok'); quota(); } catch (e) { $('cmsg').textContent = ''; toast('❌ ' + e.message); } };
+$('test').onclick = async () => {
+  $('cmsg').textContent = 'test in corso…'; $('diag').innerHTML = '';
+  try {
+    const r = await post('/api/config/test', {}); $('cmsg').textContent = '';
+    $('diag').innerHTML = `<div class="card" style="border-color:${r.ok ? 'var(--ok)' : 'var(--crit)'}"><b>${r.ok ? '✔ Collegamento funzionante' : '✕ Collegamento non riuscito'}</b>${r.steps.map((x, i) => `<div style="margin-top:8px"><span class="ico ${x.ok ? 'pass' : 'fail'}" style="display:inline-grid;vertical-align:middle">${x.ok ? '✔' : '✕'}</span> <b>${i + 1}. ${esc(x.name)}</b><div class="hint" style="margin-left:34px">${esc(x.detail)}</div>${x.hint ? `<div style="margin-left:34px;color:var(--high)">💡 ${esc(x.hint)}</div>` : ''}</div>`).join('')}</div>`;
+    if (r.ok) toast('✔ Connessione ok'); quota(); privacy();
+  } catch (e) { $('cmsg').textContent = ''; toast('❌ ' + e.message); }
+};
 $('u_set').onclick = async () => { await post('/api/usage', { used: +$('u_used').value }, 'PUT'); quota(); toast('Consumo aggiornato'); };
 $('u_reset').onclick = async () => { await post('/api/usage', { used: 0 }, 'PUT'); quota(); toast('Consumo azzerato'); };

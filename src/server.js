@@ -5,8 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig, publicConfig, ROOT } from './config.js';
 import * as G from './git.js';
-import { analyze, listReports, getReport, setChecked, setReviewState, toMarkdown } from './analyzer.js';
-import { callModel, readLocalCopilotToken } from './ai.js';
+import { analyze, PHASES, listReports, getReport, setChecked, setReviewState, toMarkdown } from './analyzer.js';
+import { diagnose, readLocalCopilotToken } from './ai.js';
 import { readUsage, setUsed } from './usage.js';
 import { allowedDestinations, readEgressLog } from './privacy.js';
 
@@ -53,26 +53,27 @@ export function createServer() {
       }
       if (req.method === 'PUT' && u.pathname === '/api/usage') setUsed((await readBody(req)).used);
       if ((req.method === 'GET' || req.method === 'PUT') && u.pathname === '/api/usage') { const u2 = readUsage(), lim = loadConfig().budget.monthlyTokens; return send(res, 200, { month: u2.month, used: u2.used, limit: lim, remaining: Math.max(0, lim - u2.used), calls: u2.calls }); }
-      if (req.method === 'GET' && u.pathname === '/api/privacy') return send(res, 200, { ...allowedDestinations(), dataDir: (await import('./config.js')).DATA, log: readEgressLog(50) });
+      if (req.method === 'GET' && u.pathname === '/api/privacy') {
+        const mask = (x) => (x ? x.replace(/\/\/[^@/]*@/, '//***@') : ''); const pe = process.env;
+        return send(res, 200, { ...allowedDestinations(), proxyEnv: mask(pe.HTTPS_PROXY || pe.https_proxy || pe.HTTP_PROXY || pe.http_proxy || ''), caEnv: pe.NODE_EXTRA_CA_CERTS || '', dataDir: (await import('./config.js')).DATA, log: readEgressLog(50) });
+      }
       if (req.method === 'GET' && u.pathname === '/api/copilot/detect') return send(res, 200, { found: !!readLocalCopilotToken() }); // mai il token
       if (u.pathname === '/api/config') {
         if (req.method === 'GET') return send(res, 200, publicConfig());
         if (req.method === 'PUT') return send(res, 200, publicConfig(saveConfig(await readBody(req))));
       }
       if (req.method === 'POST' && u.pathname === '/api/config/test') {
-        const { ai } = loadConfig();
-        const r = await callModel(ai, 'Reply {}', 'x', 5); // ~15 token; viene contabilizzato
-        const { record } = await import('./usage.js'); record((r.tin || 0) + (r.tout || 0) || 15, 'test');
-        return send(res, 200, { ok: true, reply: r.text.slice(0, 100), tokens: { in: r.tin, out: r.tout } });
+        const steps = await diagnose(loadConfig());
+        return send(res, 200, { ok: steps.every((x) => x.ok), steps });
       }
       if (req.method === 'POST' && u.pathname === '/api/analyze') {
         const b = await readBody(req);
         const repo = repoOf(b.path);
         const id = Math.random().toString(36).slice(2);
-        const job = { status: 'running', progress: 'avvio', reportId: null, error: null };
+        const job = { status: 'running', phase: 'collect', detail: '', phases: PHASES, started: Date.now(), reportId: null, error: null };
         jobs.set(id, job);
         const docs = (Array.isArray(b.docs) ? b.docs : []).slice(0, 20).map((d) => ({ name: String(d.name || 'doc').slice(0, 80), text: String(d.text || '').slice(0, 300000) }));
-        analyze({ repo, branch: b.branch, base: b.base, docs, useAI: b.useAI !== false, onProgress: (m) => { job.progress = m; } })
+        analyze({ repo, branch: b.branch, base: b.base, docs, useAI: b.useAI !== false, onProgress: (k, d) => { job.phase = k; job.detail = d || ''; } })
           .then((r) => { job.status = 'done'; job.reportId = r.id; }).catch((e) => { job.status = 'error'; job.error = e.message; });
         return send(res, 202, { job: id });
       }

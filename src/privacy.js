@@ -1,4 +1,7 @@
 import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
+import tls from 'node:tls';
 import path from 'node:path';
 import { loadConfig, DATA } from './config.js';
 
@@ -40,8 +43,9 @@ export async function guardedFetch(url, opts, purpose) {
   if (u.protocol !== 'https:' && !isLocalHost(u.hostname) && !cfg.privacy.allowHttp) deny('connessione non cifrata (http) verso host non locale');
   const bytes = opts?.body ? Buffer.byteLength(opts.body) : 0;
   let status = 0;
-  try { const res = await fetch(url, { ...opts, redirect: 'error' }); status = res.status; return res; } // niente redirect verso altri host
-  finally { logEgress({ purpose, host: u.hostname, path: u.pathname, bytes, status }); }
+  try { const res = await netRequest(u, opts || {}, cfg); status = res.status; return res; } // nessun redirect seguito: restiamo sull'host consentito
+  catch (e) { logEgress({ purpose, host: u.hostname, path: u.pathname, bytes, status: 0, error: e.message }); throw e; }
+  finally { if (status) logEgress({ purpose, host: u.hostname, path: u.pathname, bytes, status }); }
 }
 
 /* ---- oscuramento segreti prima di QUALSIASI invio ad AI ---- */
@@ -57,3 +61,62 @@ const REDACTIONS = [
   [/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[IP]'],
 ];
 export function redact(text) { let t = text; for (const [re, rep] of REDACTIONS) t = t.replace(re, rep); return t; }
+
+/* ====================================================================================
+ * Trasporto di rete (senza dipendenze): supporta PROXY aziendale (CONNECT) e CA personalizzata.
+ * fetch() di Node ignora HTTP(S)_PROXY e nasconde la causa ("fetch failed"): qui no.
+ * ==================================================================================== */
+export function proxyFor(u, cfg = loadConfig()) {
+  if (/^(localhost|127\.|\[?::1\]?$)/.test(u.hostname)) return null; // solo loopback: mai via proxy
+  const e = process.env;
+  const raw = cfg.privacy.proxyUrl || (u.protocol === 'https:' ? e.HTTPS_PROXY || e.https_proxy : e.HTTP_PROXY || e.http_proxy) || e.ALL_PROXY || e.all_proxy;
+  if (!raw) return null;
+  const no = (e.NO_PROXY || e.no_proxy || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (no.some((n) => n === '*' || u.hostname.toLowerCase() === n.replace(/^\./, '') || u.hostname.toLowerCase().endsWith('.' + n.replace(/^\./, '')))) return null;
+  try { return new URL(/^\w+:\/\//.test(raw) ? raw : 'http://' + raw); } catch { return null; }
+}
+export function describeNetError(e, host) {
+  const c = e.cause || e; const code = c.code || e.code || '';
+  const hints = {
+    ENOTFOUND: 'DNS non risolve il nome: rete aziendale senza accesso diretto a internet? Imposta il proxy.',
+    ECONNREFUSED: 'Connessione rifiutata: se la rete richiede un proxy, impostalo.',
+    ETIMEDOUT: 'Timeout: firewall/proxy che blocca l\'uscita. Imposta il proxy aziendale o chiedi di abilitare l\'host.',
+    ECONNRESET: 'Connessione chiusa dal peer: spesso un proxy/firewall che ispeziona il traffico.',
+    EHOSTUNREACH: 'Host non raggiungibile: serve un proxy o una VPN.',
+    UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'Certificato non verificabile: la rete aziendale ispeziona TLS. Indica il certificato CA aziendale (campo «File CA» o NODE_EXTRA_CA_CERTS). Non disattivare la verifica.',
+    SELF_SIGNED_CERT_IN_CHAIN: 'Certificato CA aziendale non fidato: indica il file CA aziendale (campo «File CA» o NODE_EXTRA_CA_CERTS).',
+    DEPTH_ZERO_SELF_SIGNED_CERT: 'Certificato autofirmato: indica il file CA aziendale.',
+    CERT_HAS_EXPIRED: 'Certificato scaduto: controlla data/ora del PC.',
+    ERR_TLS_CERT_ALTNAME_INVALID: 'Il certificato non corrisponde all\'host: controlla l\'URL.',
+  };
+  return { code, detail: c.message || String(e), hint: hints[code] || '' };
+}
+const netErr = (e, u) => { const d = describeNetError(e, u.hostname); const err = new Error(`Connessione a ${u.hostname} non riuscita: ${d.code || d.detail}${d.hint ? ' — ' + d.hint : ''}`); err.code = d.code; err.hint = d.hint; return err; };
+
+function caFor(cfg) { if (!cfg.privacy.caFile) return undefined; try { return [...tls.rootCertificates, fs.readFileSync(cfg.privacy.caFile, 'utf8')]; } catch (e) { throw new Error(`File CA non leggibile (${cfg.privacy.caFile}): ${e.message}`); } }
+
+function netRequest(u, opts, cfg) {
+  return new Promise((resolve, reject) => {
+    const px = proxyFor(u, cfg); const method = opts.method || 'GET'; const headers = { ...(opts.headers || {}) };
+    if (opts.body) headers['content-length'] = Buffer.byteLength(opts.body);
+    const isHttps = u.protocol === 'https:', ca = caFor(cfg);
+    const abort = (req) => { if (opts.signal) { const on = () => { const er = new Error('Timeout o richiesta annullata'); er.code = 'ETIMEDOUT'; req.destroy(er); }; opts.signal.aborted ? on() : opts.signal.addEventListener('abort', on, { once: true }); } };
+    const done = (req) => { abort(req); req.on('response', (res) => { const chunks = []; res.on('data', (c) => chunks.push(c)); res.on('end', () => { const h = new Headers(); for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) h.set(k, Array.isArray(v) ? v.join(', ') : v); const st = res.statusCode; resolve(new Response([204, 205, 304].includes(st) ? null : Buffer.concat(chunks), { status: st, headers: h })); }); res.on('error', (e) => reject(netErr(e, u))); }); req.on('error', (e) => reject(netErr(e, u))); if (opts.body) req.write(opts.body); req.end(); };
+    const auth = px && px.username ? 'Basic ' + Buffer.from(`${decodeURIComponent(px.username)}:${decodeURIComponent(px.password)}`).toString('base64') : null;
+    const path = u.pathname + u.search;
+    if (!px) { const m = isHttps ? https : http; return done(m.request({ protocol: u.protocol, hostname: u.hostname, port: u.port || (isHttps ? 443 : 80), path, method, headers, ca })); }
+    if (!isHttps) { // http via proxy: richiesta con URL assoluto
+      if (auth) headers['proxy-authorization'] = auth; headers.host = u.host;
+      return done(http.request({ hostname: px.hostname, port: px.port || 80, path: u.href, method, headers }));
+    }
+    // https via proxy: tunnel CONNECT, poi TLS verso l'host reale (la verifica certificati resta attiva)
+    const c = http.request({ hostname: px.hostname, port: px.port || 80, method: 'CONNECT', path: `${u.hostname}:${u.port || 443}`, headers: { host: `${u.hostname}:${u.port || 443}`, ...(auth ? { 'proxy-authorization': auth } : {}) } });
+    c.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) { socket.destroy(); const er = new Error(`Il proxy ha rifiutato il tunnel verso ${u.hostname} (HTTP ${res.statusCode})${res.statusCode === 407 ? ': credenziali proxy mancanti (usa http://utente:password@proxy:porta)' : ''}`); return reject(er); }
+      const t = tls.connect({ socket, servername: u.hostname, ca });
+      done(https.request({ hostname: u.hostname, path, method, headers, createConnection: () => t, agent: false }));
+    });
+    c.on('error', (e) => reject(Object.assign(new Error(`Proxy ${px.host} non raggiungibile: ${e.code || e.message}`), { code: e.code })));
+    abort(c); c.end();
+  });
+}

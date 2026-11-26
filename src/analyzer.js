@@ -11,6 +11,7 @@ import { buildReview, reviewStats, reviewChecklistItem, loadStore, saveStore } f
 import { triage, impactReview, newUsage } from './ai.js';
 import { loadConfig, DATA } from './config.js';
 
+export const PHASES = [['collect', 'Raccolta modifiche'], ['rules', 'Regole statiche'], ['cve', 'Verifica CVE'], ['commits', 'Analisi per commit'], ['review', 'Revisione riga per riga'], ['impact', 'Impatto sugli endpoint'], ['symbols', 'Simboli rimossi / firme'], ['ai', 'Revisione AI']];
 const SEV = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
 const ignored = (cfg, p) => cfg.analysis.ignorePaths.some((i) => p.includes(i));
 
@@ -22,7 +23,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   if (!base) { detected = await G.detectBase(repo, branch); if (!detected) throw new Error('Impossibile dedurre il branch base: specificalo'); base = detected.base; }
   G.safeRef(base);
   const mb = await G.mergeBase(repo, base, branch);
-  onProgress('Raccolta modifiche rispetto a ' + base);
+  onProgress('collect', 'rispetto a ' + base);
 
   // Solo i commit del branch (dal punto di stacco) + le modifiche locali non committate se sei su quel branch.
   const dirty = await G.dirtyFiles(repo);
@@ -55,7 +56,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   });
 
   /* --- regole a livello riga --- */
-  onProgress('Scansione regole statiche');
+  onProgress('rules');
   for (const [file, d] of diff) {
     if (ignored(cfg, file)) continue;
     for (const f of R.scanHunks(file, d.hunks)) add(f);
@@ -83,7 +84,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   /* --- CVE sulle dipendenze aggiunte/cambiate (0 token, OSV.dev) --- */
   let deps = [], cveInfo = { checked: 0, error: null, disabled: !cfg.analysis.cve.enabled };
   if (cfg.analysis.cve.enabled && manifests.concat(locks).length) {
-    onProgress('Verifica CVE delle dipendenze modificate');
+    onProgress('cve');
     deps = await changedDeps(repo, mb, TO, files.filter((f) => f.status !== 'D').map((f) => f.path));
     cveInfo = { ...cveInfo, ...(await checkCves(deps, cfg.analysis.cve)) };
     for (const d of deps) {
@@ -93,7 +94,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   }
 
   /* --- analisi per singolo commit (0 token) + attribuzione dei problemi al commit che li ha introdotti --- */
-  onProgress('Analisi per singolo commit');
+  onProgress('commits');
   const perCommit = await analyzeCommits(repo, commits, { ignored: (p) => ignored(cfg, p), max: cfg.analysis.maxCommits });
   const finalKeys = new Set(findings.filter((f) => f.code).map(findingKey));
   const introducedBy = new Map();
@@ -111,7 +112,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   }
 
   /* --- revisione riga per riga: ogni hunk di ogni commit diventa una voce da decidere (0 token) --- */
-  onProgress('Revisione di ogni modifica');
+  onProgress('review');
   const store = loadStore(repo, branch);
   const review = buildReview({ commits, perCommit: perCommit.byHash, finalDiff: diff, store, ignored: (p) => ignored(cfg, p), max: cfg.analysis.maxReviewItems });
   saveStore(repo, branch, store);
@@ -128,7 +129,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   let impact = { endpoints: [], analyzed: 0, skipped: 0, disabled: !cfg.analysis.impact.enabled }; let impactPacks = [];
   const aiReady = useAI && cfg.ai.enabled && cfg.ai.model && !cfg.privacy.offline;
   if (cfg.analysis.impact.enabled) {
-    onProgress('Impatto sugli endpoint');
+    onProgress('impact');
     const hashByShort = new Map(commits.map((c) => [c.short, c.hash]));
     try {
       impact = { ...impact, ...(await computeImpact({ repo, ref: TO, items: review.items, hashOf: (sh) => hashByShort.get(sh), changedFiles: new Set(files.map((f) => f.path)), cfg, buildPacks: aiReady })) };
@@ -144,7 +145,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   }
 
   /* --- regressioni: simboli rimossi/cambiati ancora usati --- */
-  onProgress('Ricerca simboli rimossi o con firma cambiata');
+  onProgress('symbols');
   let symChecks = 0;
   for (const [file, d] of diff) {
     if (ignored(cfg, file) || !R.isSourcePath(file)) continue;
@@ -174,7 +175,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     const RW = { critical: 4, high: 3, medium: 2, low: 1 };
     const packs = impactPacks.filter((p) => RW[p.risk] >= 2 || p.tags.length).sort((a, b) => RW[b.risk] - RW[a.risk]);
     if (packs.length) {
-      onProgress('Revisione AI dell\'impatto (contesto chiuso)');
+      onProgress('ai', 'impatto a contesto chiuso');
       try {
         const ir = await impactReview(cfg, packs, usage);
         aiInfo.impactReviewed = ir.verdicts.size; aiInfo.impactSkipped = ir.skipped; aiInfo.errors.push(...ir.errors);
@@ -185,7 +186,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
         }
       } catch (e) { aiInfo.errors.push(e.message); }
     }
-    onProgress('Triage AI (budget ' + cfg.budget.maxContextTokens + ' token/chiamata)');
+    onProgress('ai', 'triage finale');
     // Risparmio token: le regole "certe" (chiavi, conflitti...) NON vanno all'AI. Solo i casi ambigui,
     // poi le regressioni (simbolo+file), infine gli hunk rischiosi, finche' la quota lo permette.
     const CERTAIN = new Set(['SEC-SECRET-PRIVKEY', 'SEC-SECRET-AWS', 'SEC-SECRET-TOKEN', 'ERR-CONFLICT', 'SEC-SENSITIVE-FILE']);

@@ -38,6 +38,8 @@ export const DEFAULTS = {
     offline: false,             // blocca QUALSIASI connessione in uscita (analisi solo statica)
     sendCode: true,             // false = all'AI vanno solo metadati, mai righe di codice
     redactSecrets: true,        // oscura chiavi/token/password/email/IP prima di ogni invio
+    proxyUrl: '',               // proxy aziendale (es. http://utente:pwd@proxy:8080); vuoto = usa HTTPS_PROXY/HTTP_PROXY dell'ambiente
+    caFile: '',                 // certificato CA aziendale (PEM) se la rete ispeziona TLS; la verifica NON viene mai disattivata
     allowHttp: false,           // consente http non cifrato verso host non locali
   },
   analysis: {
@@ -73,6 +75,7 @@ export function saveConfig(patch) {
   const next = merge(cur, patch);
   next.ai.provider = ['openai', 'anthropic', 'ollama', 'copilot'].includes(next.ai.provider) ? next.ai.provider : 'openai';
   if (typeof next.ai.extraHeaders === 'string') { try { next.ai.extraHeaders = JSON.parse(next.ai.extraHeaders || '{}'); } catch { throw new Error('extraHeaders non e\' JSON valido'); } }
+  next.privacy.proxyUrl = String(next.privacy.proxyUrl || '').trim(); next.privacy.caFile = String(next.privacy.caFile || '').trim();
   next.ai.copilotAutoToken = !!next.ai.copilotAutoToken;
   for (const k of ['offline', 'sendCode', 'redactSecrets', 'allowHttp']) next.privacy[k] = !!next.privacy[k];
   next.analysis.cve.cacheHours = num(next.analysis.cve.cacheHours, 0, 720, 24);

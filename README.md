@@ -19,6 +19,9 @@ npm test
 - Azure OpenAI, OpenAI, Anthropic Claude, Ollama/locale, qualsiasi gateway OpenAI-compatibile.
 - Il guard di rete consente solo gli host del provider scelto (per Copilot anche l'host di scambio token, che riceve solo il token GitHub).
 
+### Rete aziendale: proxy, certificati, «fetch failed»
+Il tool usa un proprio trasporto di rete (non `fetch`, che ignora i proxy e nasconde la causa). Supporta **proxy HTTP/HTTPS con tunnel CONNECT** (campo «Proxy aziendale» oppure `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` dell'ambiente) e un **file CA aziendale** (campo «File CA» o `NODE_EXTRA_CA_CERTS`) quando la rete ispeziona TLS; la verifica dei certificati non viene mai disattivata. Il pulsante **Test connessione** fa una diagnostica a passi (token → scambio con GitHub → chiamata al modello) e mostra l'errore reale con un suggerimento (DNS, firewall/proxy, certificato, licenza). Nota: leggere il token Copilot dal PC è un'operazione su file locale, mentre scambio token e chiamata richiedono rete verso GitHub: sono due cose distinte.
+
 ## Budget token: 2000 al MESE
 Il limite è un **contatore mensile persistente** (`~/.testerai/usage.json`, si azzera a inizio mese) mostrato in alto nel FE. Ogni chiamata viene dimensionata sul residuo e **non parte** se non ci sta; i token contati sono quelli reali del provider (stima se assenti).
 - Default: mese 2000 · per analisi 400 · per chiamata 600 · output 40 · max 3 chiamate · documenti 60 (tutto modificabile da FE, incluso il consumo del mese: aggiorna o azzera).

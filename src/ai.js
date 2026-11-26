@@ -207,3 +207,17 @@ export async function impactReview(cfg, packs, usage = newUsage(cfg)) {
   }
   return { verdicts: out, errors, skipped, usage };
 }
+
+/** Diagnostica passo-passo del collegamento AI (cosi' si vede DOVE si rompe: token, rete, proxy, certificato, licenza). */
+export async function diagnose(cfg) {
+  const ai = cfg.ai, steps = [];
+  const host = (u) => { try { return new URL(u).host; } catch { return u; } };
+  const step = async (name, fn) => { try { steps.push({ name, ok: true, detail: (await fn()) || '' }); return true; } catch (e) { steps.push({ name, ok: false, detail: e.message, hint: e.hint || '' }); return false; } };
+  if (ai.provider === 'copilot') {
+    if (!(await step('Token GitHub', async () => { if (ai.apiKey) return 'API key impostata'; if (ai.copilotAutoToken) { if (readLocalCopilotToken()) return 'letto dal login Copilot locale (mai inviato altrove che a GitHub)'; throw new Error('login Copilot locale non trovato in ~/.config/github-copilot'); } throw new Error('nessun token: incolla la API key o abilita «usa il login già presente»'); }))) return steps;
+    ctok.clear();
+    if (!(await step(`Scambio token con GitHub (${host(ai.copilotTokenUrl)})`, async () => { await copilotToken(ai); return 'token Copilot ottenuto: licenza valida'; }))) return steps;
+  }
+  await step(`Chiamata al modello (${host(ai.baseUrl)})`, async () => { const r = await callModel(ai, 'Reply {}', 'x', 5); record((r.tin || 0) + (r.tout || 0) || 15, 'test'); return `risposta ricevuta (${(r.tin || 0) + (r.tout || 0) || '~15'} token)`; });
+  return steps;
+}

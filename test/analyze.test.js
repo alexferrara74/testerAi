@@ -274,3 +274,24 @@ test('AI sull\'impatto: contesto chiuso (solo funzione, callee, chiamanti, perco
   saveConfig({ privacy: { sendCode: true } });
   srv.close();
 });
+
+test('rete: causa reale invece di "fetch failed", proxy aziendale, diagnostica Copilot', async () => {
+  const { guardedFetch } = await import('../src/privacy.js'); const { diagnose } = await import('../src/ai.js'); const { loadConfig } = await import('../src/config.js');
+  // 1) host irraggiungibile -> codice di errore leggibile, non "fetch failed"
+  saveConfig({ privacy: { offline: false, proxyUrl: '' }, ai: { enabled: true, provider: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', apiKey: 'k' } });
+  await assert.rejects(guardedFetch('http://127.0.0.1:1/v1/chat/completions', { method: 'POST', body: '{}' }, 'ai'), (e) => /ECONNREFUSED/.test(e.message) && !/^fetch failed$/.test(e.message));
+  // 2) http via proxy: la richiesta passa dal proxy con URL assoluto
+  let seenUrl = '', seenAuth = '';
+  const proxy = http.createServer((req, res) => { seenUrl = req.url; seenAuth = req.headers['proxy-authorization'] || ''; res.setHeader('content-type', 'application/json'); res.end('{"via":"proxy"}'); }).listen(0);
+  saveConfig({ ai: { enabled: true, provider: 'openai', baseUrl: 'http://gw.local:8081/v1', model: 'm', apiKey: 'k' }, privacy: { proxyUrl: `http://user:pw@127.0.0.1:${proxy.address().port}` } });
+  const r = await guardedFetch('http://gw.local:8081/v1/chat/completions', { method: 'POST', body: '{}' }, 'ai');
+  assert.equal((await r.json()).via, 'proxy'); assert.equal(seenUrl, 'http://gw.local:8081/v1/chat/completions'); assert.match(seenAuth, /^Basic /);
+  // 3) https via proxy: il tunnel CONNECT viene richiesto; rifiuto del proxy spiegato
+  let connectTo = '';
+  const proxy2 = http.createServer(() => {}); proxy2.on('connect', (req, sock) => { connectTo = req.url; sock.end('HTTP/1.1 403 Forbidden\r\n\r\n'); }); proxy2.listen(0);
+  saveConfig({ ai: { baseUrl: 'https://api.githubcopilot.com', provider: 'copilot', copilotTokenUrl: 'https://api.github.com/copilot_internal/v2/token', apiKey: 'ghu_x', enabled: true }, privacy: { proxyUrl: `http://127.0.0.1:${proxy2.address().port}` } });
+  const steps = await diagnose(loadConfig());
+  assert.equal(connectTo, 'api.github.com:443');
+  assert.ok(steps[0].ok && !steps[1].ok && /proxy/i.test(steps[1].detail) && steps.length === 2, JSON.stringify(steps));
+  saveConfig({ privacy: { proxyUrl: '' } }); proxy.close(); proxy2.close();
+});
