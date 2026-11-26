@@ -146,7 +146,7 @@ function pOv() {
   <div class="grid g3">
    <div class="card"><h3>Per categoria</h3>${Object.entries(CATS).map(([k, n]) => `<div class="row" style="margin:6px 0"><span class="grow">${n}</span><b>${catN[k] || 0}</b></div>`).join('')}</div>
    <div class="card"><h3>Commit più rischiosi</h3>${topC.length ? topC.map((c) => `<div style="margin:6px 0"><span class="mono">${c.short}</span> ${esc(c.subject)} <span class="tag ${c.analysis.risk >= 8 ? 'critical' : c.analysis.risk >= 4 ? 'high' : 'medium'}">${c.analysis.risk}</span></div>`).join('') : '<div class="hint">Nessun commit a rischio 👍</div>'}</div>
-   <div class="card"><h3>Token AI</h3>${r.ai.used ? `<b style="font-size:24px">${r.ai.spent}</b> <span class="hint">spesi · mese ${r.ai.monthlyUsedBefore + r.ai.spent}/${r.ai.monthlyLimit}</span><div class="hint">${r.ai.calls} chiamate (${r.ai.cached} da cache) · ${r.ai.skipped} elementi non inviati</div>${r.ai.errors.length ? `<div class="hint" style="color:var(--high)">⚠ ${esc(r.ai.errors.join('; '))}</div>` : ''}` : `<b style="font-size:24px">0</b> <div class="hint">${esc(r.ai.note || 'AI non usata')}</div>`}</div>
+   <div class="card"><h3>Token AI</h3>${r.ai.used ? `<b style="font-size:24px">${r.ai.spent}</b> <span class="hint">spesi · mese ${r.ai.monthlyUsedBefore + r.ai.spent}/${r.ai.monthlyLimit}</span><div class="hint">${r.ai.calls} chiamate (${r.ai.cached} da cache) · ${r.ai.skipped} elementi non inviati${r.ai.impactReviewed ? ` · ${r.ai.impactReviewed} impatti valutati a contesto chiuso` : ''}</div>${r.ai.errors.length ? `<div class="hint" style="color:var(--high)">⚠ ${esc(r.ai.errors.join('; '))}</div>` : ''}` : `<b style="font-size:24px">0</b> <div class="hint">${esc(r.ai.note || 'AI non usata')}</div>`}</div>
   </div>
   <div class="card"><h3>Checklist · ${done}/${r.checklist.length} verificate</h3><div class="row">${r.checklist.map((c) => `<span class="ico ${c.status}" title="${esc(c.title)}">${ICON[c.status]}</span>`).join('')}</div></div>`;
 }
@@ -237,6 +237,7 @@ function impactBlock(i) {
   return `<div style="border:1px solid var(--bd);border-radius:10px;padding:8px 10px;background:var(--panel2)"><div class="row"><b>🧭 Impatto</b><span class="tag ${cls}">${m.risk}</span><span class="hint">${m.callers} punti di chiamata${m.fn ? ' di <span class="mono">' + esc(m.fn) + '</span>' : ''}</span></div>
    ${m.endpoints.length ? m.endpoints.slice(0, 4).map((e) => `<div class="mono" style="margin-top:4px">${e.chain.map(esc).join(' → ')} <b>⇒ ${esc(e.label)}</b></div>`).join('') : '<div class="hint">Nessun endpoint raggiunto (chiamanti interni o non risolvibili staticamente).</div>'}
    ${m.reasons.map((x) => `<div class="hint">• ${esc(x)}</div>`).join('')}
+   ${m.ai ? `<div style="margin-top:6px">🤖 <span class="tag ${m.ai.v === 'risk' ? 'high' : m.ai.v === 'ok' ? 'low' : 'medium'}">${m.ai.v === 'risk' ? 'rischio confermato' : m.ai.v === 'ok' ? 'nessun rischio' : 'incerto'}</span> <span class="hint">${esc(m.ai.why)}</span></div>` : ''}
    ${m.untouched.length ? `<div class="hint">Chiamanti non toccati dal branch: <span class="mono">${m.untouched.slice(0, 4).map(esc).join(', ')}</span></div>` : ''}${m.tests.length ? `<div class="hint">Test: <span class="mono">${m.tests.slice(0, 3).map(esc).join(', ')}</span></div>` : ''}</div>`;
 }
 function item(i) {

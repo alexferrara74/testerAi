@@ -82,42 +82,48 @@ function parseReply(text) {
   } catch { return e; }
 }
 
+/* ---------- budget condiviso tra triage e revisione d'impatto ---------- */
+export const newUsage = (cfg) => ({ calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, spent: 0, monthlyLimit: cfg.budget.monthlyTokens, monthlyUsedBefore: readUsage().used });
+export const leftTokens = (cfg, u) => Math.min(cfg.budget.perAnalysisTokens - u.spent, remaining(cfg.budget.monthlyTokens));
+
+/** Crea la funzione di chiamata: redazione segreti, cache, tetti per analisi/mese, contabilita' reale. */
+function makeAsk(cfg, usage, system, parse) {
+  const { ai, budget } = cfg; const sysTokens = estimate(system);
+  return async (user, note) => {
+    if (cfg.privacy.redactSecrets) user = redact(user); // ultima barriera: nulla di sensibile esce
+    const key = crypto.createHash('sha1').update(`${ai.provider}|${ai.model}|${system}|${user}`).digest('hex');
+    const c = loadCache();
+    if (budget.cache && c[key]) { usage.cached++; return c[key]; }
+    if (usage.calls >= budget.maxCalls) return null;
+    if (sysTokens + estimate(user) + budget.maxOutputTokens > leftTokens(cfg, usage)) return null; // mai superare la quota
+    usage.calls++; usage.estIn += sysTokens + estimate(user);
+    const r = await callModel(ai, system, user, budget.maxOutputTokens);
+    const real = (r.tin || 0) + (r.tout || 0);
+    const spent = real || (sysTokens + estimate(user) + estimate(r.text));
+    usage.spent += spent; usage.estOut += estimate(r.text); usage.in += r.tin || 0; usage.out += r.tout || 0;
+    record(spent, note);
+    const parsed = parse(r.text);
+    if (budget.cache) { c[key] = parsed; saveCache(); }
+    return parsed;
+  };
+}
+
 /**
  * Il vero limite e' MENSILE (budget.monthlyTokens, contatore persistente in usage.json) e per singola
  * analisi (perAnalysisTokens). Ogni chiamata viene dimensionata sul residuo; se non c'e' spazio non parte.
  * Le risposte in cache non consumano nulla.
  */
-export async function triage(cfg, items, docsText, ctx) {
-  const { ai, budget } = cfg;
-  const usage = { calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, spent: 0, monthlyLimit: budget.monthlyTokens, monthlyUsedBefore: readUsage().used };
+export async function triage(cfg, items, docsText, ctx, usage = newUsage(cfg)) {
+  const { budget } = cfg;
   const res = { bug: new Map(), fp: new Set(), usage, skipped: items.length, errors: [] };
   const sysTokens = estimate(SYSTEM);
-  const left = () => Math.min(budget.perAnalysisTokens - usage.spent, remaining(budget.monthlyTokens));
   const docs = docsText ? fit(`DOCS:\n${docsText}\n`, budget.docTokens) : '';
-  const room = () => Math.min(budget.maxContextTokens, left()) - budget.maxOutputTokens - sysTokens - estimate(docs) - 8;
+  const room = () => Math.min(budget.maxContextTokens, leftTokens(cfg, usage)) - budget.maxOutputTokens - sysTokens - estimate(docs) - 8;
   if (room() < 40) { res.errors.push(`Quota token esaurita o troppo bassa (residuo mese: ${remaining(budget.monthlyTokens)}, analisi: ${budget.perAnalysisTokens - usage.spent})`); return res; }
+  const ask = makeAsk(cfg, usage, SYSTEM, parseReply);
 
   const queue = [...items].sort((a, b) => b.priority - a.priority);
   const sent = new Set();
-
-  const ask = async (user, note) => {
-    if (cfg.privacy.redactSecrets) user = redact(user); // ultima barriera: nulla di sensibile esce
-    const key = crypto.createHash('sha1').update(`${ai.provider}|${ai.model}|${user}`).digest('hex');
-    const c = loadCache();
-    if (budget.cache && c[key]) { usage.cached++; return c[key]; }
-    if (usage.calls >= budget.maxCalls) return null;
-    const cost = sysTokens + estimate(user) + budget.maxOutputTokens;
-    if (cost > left()) return null; // mai superare la quota
-    usage.calls++; usage.estIn += sysTokens + estimate(user);
-    const r = await callModel(ai, SYSTEM, user, budget.maxOutputTokens);
-    const real = (r.tin || 0) + (r.tout || 0);
-    const spent = real || (sysTokens + estimate(user) + estimate(r.text));
-    usage.spent += spent; usage.estOut += estimate(r.text); usage.in += r.tin || 0; usage.out += r.tout || 0;
-    record(spent, note);
-    const parsed = parseReply(r.text);
-    if (budget.cache) { c[key] = parsed; saveCache(); }
-    return parsed;
-  };
   const apply = (p) => { for (const b of p.bug) res.bug.set(String(Array.isArray(b) ? b[0] : b), ''); for (const f of p.fp) res.fp.add(String(f)); };
 
   while (queue.length && usage.calls < budget.maxCalls && room() >= 40) {
@@ -147,4 +153,57 @@ export async function triage(cfg, items, docsText, ctx) {
   }
   res.skipped = items.length - sent.size;
   return res;
+}
+
+/* ============================================================================
+ * REVISIONE D'IMPATTO con CONTESTO CHIUSO.
+ * L'AI non ha strumenti e non vede il repository: riceve SOLO un "pacchetto" costruito da noi con
+ * la funzione modificata (diff), i metodi che chiama, i chiamanti diretti e la catena fino all'endpoint.
+ * Puo' chiedere (ask) solo simboli contenuti nel pacchetto; qualsiasi altra richiesta viene ignorata.
+ * ============================================================================ */
+const SYSTEM_I = 'Impact review. Judge ONLY with the given context (changed fn, callees, callers, path to endpoint). JSON only: {"v":"ok|risk|unsure","why":"max 20 words IT","ask":["one symbol from context if essential"]}';
+function parseImpact(text) {
+  const m = text.match(/\{[\s\S]*\}/); const e = { v: 'unsure', why: '', ask: [] };
+  if (!m) return e;
+  try { const j = JSON.parse(m[0]); return { v: ['ok', 'risk', 'unsure'].includes(j.v) ? j.v : 'unsure', why: String(j.why || '').slice(0, 200), ask: Array.isArray(j.ask) ? j.ask.map(String).slice(0, 2) : [] }; } catch { return e; }
+}
+
+/** Compone il pacchetto a sezioni in ordine di priorita' finche' c'e' budget. metaOnly = nessuna riga di codice. */
+export function renderPack(pack, tokens, metaOnly) {
+  const sec = [];
+  sec.push(`FN ${pack.sig || pack.fn} @${pack.file.split('/').pop()}`);
+  sec.push(`TAGS ${pack.tags.join(', ')}`);
+  if (pack.endpoints.length) sec.push('PATH ' + pack.endpoints.slice(0, 3).map((e) => `${e.chain.join('>')} => ${e.label}`).join(' | '));
+  if (!metaOnly && pack.diff.length) sec.push('CHG\n' + pack.diff.join('\n'));
+  if (pack.callers.length) sec.push('CALLERS\n' + pack.callers.map((c) => metaOnly ? c.name : `${c.name}: ${c.callText}`).join('\n'));
+  if (pack.callees.length) sec.push('CALLEES\n' + pack.callees.map((c) => metaOnly ? c.name : c.sig).join('\n'));
+  sec.push(`TESTS ${pack.tests} | UNTOUCHED-CALLERS ${pack.untouched}`);
+  if (!metaOnly && pack.body.length) sec.push('BODY\n' + pack.body.join('\n'));
+  let out = '', used = 0;
+  for (const part of sec) { const c = estimate(part) + 1; if (used + c > tokens) { if (!out) out = fit(part, tokens); break; } out += (out ? '\n' : '') + part; used += c; }
+  return out;
+}
+
+export async function impactReview(cfg, packs, usage = newUsage(cfg)) {
+  const { budget } = cfg; const out = new Map(); const errors = []; let skipped = 0;
+  const sysTokens = estimate(SYSTEM_I); const metaOnly = !cfg.privacy.sendCode;
+  const room = () => Math.min(budget.maxContextTokens, leftTokens(cfg, usage)) - budget.maxOutputTokens - sysTokens - 8;
+  const ask = makeAsk(cfg, usage, SYSTEM_I, parseImpact);
+  for (const pack of packs) {
+    if (usage.calls >= budget.maxCalls || room() < 80) { skipped++; continue; }
+    try {
+      let p = await ask(renderPack(pack, room(), metaOnly), 'impact');
+      if (!p) { skipped++; continue; }
+      for (let round = 0; round < budget.maxRounds && p.ask.length && !metaOnly && usage.calls < budget.maxCalls && room() >= 80; round++) {
+        const sym = p.ask[0];
+        if (!pack.allow.has(sym)) break;                       // fuori dal perimetro: ignorata
+        const body = await pack.bodyOf(sym); if (!body.length) break;
+        const extra = fit(`CTX ${sym}\n${body.join('\n')}`, Math.floor(room() * 0.65));
+        const head = renderPack({ ...pack, callers: [], callees: [], body: [], diff: pack.diff.slice(0, 6) }, Math.max(40, room() - estimate(extra) - 4), false);
+        const p2 = await ask(extra + '\n' + head, 'impact-ask'); if (!p2) break; p = p2;
+      }
+      out.set(pack.key, p);
+    } catch (e) { errors.push(e.message); break; }
+  }
+  return { verdicts: out, errors, skipped, usage };
 }

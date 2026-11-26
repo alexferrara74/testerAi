@@ -229,3 +229,48 @@ test('impatto: dalla modifica in un punto esistente risale fino all\'endpoint; m
   const rep2 = await analyze({ repo: r3, branch: 'feat', base: 'main', useAI: false });
   assert.ok(!rep2.commits.some((c) => c.short === 'locale'));
 });
+
+test('AI sull\'impatto: contesto chiuso (solo funzione, callee, chiamanti, percorso); ask fuori perimetro ignorata', async () => {
+  const r4 = path.join(tmp, 'repo4'); fs.mkdirSync(r4);
+  const h = (...a) => execFileSync('git', a, { cwd: r4, stdio: 'pipe' }).toString();
+  const w = (f, t) => { fs.mkdirSync(path.dirname(path.join(r4, f)), { recursive: true }); fs.writeFileSync(path.join(r4, f), t); };
+  h('init', '-q', '-b', 'main'); h('config', 'user.email', 't@t'); h('config', 'user.name', 't');
+  w('src/util.js', 'export function normalizeInput(u) {\n  const CALLEE_BODY_MARKER = 1;\n  return u;\n}\n');
+  w('src/validate.js', 'import { normalizeInput } from "./util.js";\nexport function checkUser(u) {\n  normalizeInput(u);\n  if (!u || !u.id) throw new Error("bad user");\n  return true;\n}\n');
+  w('src/service.js', 'import { checkUser } from "./validate.js";\nexport function login(u) {\n  checkUser(u);\n  return "token";\n}\n');
+  w('src/routes.js', 'import { login } from "./service.js";\nrouter.post("/login", (req, res) => {\n  res.json(login(req.body));\n});\n');
+  w('src/unrelated.js', 'export function otherThing() {\n  const UNRELATED_MARKER = 42;\n  return UNRELATED_MARKER;\n}\n');
+  h('add', '.'); h('commit', '-qm', 'base'); h('checkout', '-qb', 'feat');
+  w('src/validate.js', 'import { normalizeInput } from "./util.js";\nexport function checkUser(u) {\n  normalizeInput(u);\n  return true;\n}\n');
+  h('add', '.'); h('commit', '-qm', 'drop validation');
+  const seen = []; let script = ['normalizeInput', null];
+  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
+    const j = JSON.parse(b); const sys = j.messages[0].content, usr = j.messages[1].content; seen.push({ sys, usr });
+    let content = '{"b":[],"f":[],"a":[]}';
+    if (/Impact review/.test(sys)) { const ask = script.shift(); content = ask ? `{"v":"unsure","why":"serve il callee","ask":["${ask}"]}` : '{"v":"risk","why":"guardia rimossa: raggiungibile da POST /login","ask":[]}'; }
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content } }], usage: { prompt_tokens: 90, completion_tokens: 10 } })); }); }).listen(0);
+  const reset = () => fs.writeFileSync(path.join(process.env.TESTERAI_DATA, 'usage.json'), '{}');
+  saveConfig({ ai: { enabled: true, provider: 'openai', baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, model: 'm', apiKey: 'k' }, budget: { monthlyTokens: 5000, perAnalysisTokens: 1500, maxContextTokens: 900, maxCalls: 6, maxRounds: 1, cache: false }, privacy: { offline: false, sendCode: true, redactSecrets: true } });
+  reset();
+  const rep = await analyze({ repo: r4, branch: 'feat', base: 'main', useAI: true });
+  const imp = seen.filter((x) => /Impact review/.test(x.sys));
+  assert.equal(imp.length, 2, 'prima chiamata + follow-up su simbolo del perimetro');
+  assert.match(imp[0].usr, /FN .*checkUser/); assert.match(imp[0].usr, /login/); assert.match(imp[0].usr, /=> POST \/login/); assert.match(imp[0].usr, /normalizeInput/);
+  assert.match(imp[1].usr, /CALLEE_BODY_MARKER/, 'follow-up col corpo del callee richiesto');
+  for (const x of seen) assert.ok(!/UNRELATED_MARKER|otherThing/.test(x.usr), 'codice fuori perimetro inviato!');
+  const f = rep.findings.find((x) => x.rule === 'REG-IMPACT');
+  assert.equal(f.ai, 'confermato'); assert.match(f.aiNote, /POST \/login/);
+  assert.ok(rep.review.items.some((i) => i.impact?.ai?.v === 'risk'));
+  // ask fuori perimetro: ignorata, nessun follow-up
+  seen.length = 0; script = ['otherThing', null]; reset();
+  await analyze({ repo: r4, branch: 'feat', base: 'main', useAI: true });
+  assert.equal(seen.filter((x) => /Impact review/.test(x.sys)).length, 1, 'ask non whitelisted -> nessuna seconda chiamata');
+  for (const x of seen) assert.ok(!/UNRELATED_MARKER/.test(x.usr));
+  // sendCode=false: solo nomi/percorso, nessuna riga di codice
+  seen.length = 0; script = [null]; reset(); saveConfig({ privacy: { sendCode: false } });
+  await analyze({ repo: r4, branch: 'feat', base: 'main', useAI: true });
+  const m = seen.find((x) => /Impact review/.test(x.sys));
+  assert.ok(m && /=> POST \/login/.test(m.usr) && !/CHG|BODY|return true|normalizeInput\(u\)/.test(m.usr), 'metadati senza codice');
+  saveConfig({ privacy: { sendCode: true } });
+  srv.close();
+});

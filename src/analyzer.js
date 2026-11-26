@@ -8,7 +8,7 @@ import { analyzeCommits, findingKey } from './commits.js';
 import { changedDeps, checkCves } from './deps.js';
 import { computeImpact } from './impact.js';
 import { buildReview, reviewStats, reviewChecklistItem, loadStore, saveStore } from './review.js';
-import { triage } from './ai.js';
+import { triage, impactReview, newUsage } from './ai.js';
 import { loadConfig, DATA } from './config.js';
 
 const SEV = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
@@ -39,7 +39,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   }
 
   const findings = [];
-  const add = (f) => findings.push({ id: 'F' + (findings.length + 1), source: 'rule', ...f });
+  const add = (f) => { const x = { id: 'F' + (findings.length + 1), source: 'rule', ...f }; findings.push(x); return x; };
 
   /* --- elenco completo delle modifiche rispetto al branch base --- */
   const files = status.map((s) => {
@@ -125,19 +125,21 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
   }
 
   /* --- impatto: dalle modifiche in punti esistenti risale i chiamanti fino agli endpoint (0 token) --- */
-  let impact = { endpoints: [], analyzed: 0, skipped: 0, disabled: !cfg.analysis.impact.enabled };
+  let impact = { endpoints: [], analyzed: 0, skipped: 0, disabled: !cfg.analysis.impact.enabled }; let impactPacks = [];
+  const aiReady = useAI && cfg.ai.enabled && cfg.ai.model && !cfg.privacy.offline;
   if (cfg.analysis.impact.enabled) {
     onProgress('Impatto sugli endpoint');
     const hashByShort = new Map(commits.map((c) => [c.short, c.hash]));
     try {
-      impact = { ...impact, ...(await computeImpact({ repo, ref: TO, items: review.items, hashOf: (sh) => hashByShort.get(sh), changedFiles: new Set(files.map((f) => f.path)), cfg })) };
+      impact = { ...impact, ...(await computeImpact({ repo, ref: TO, items: review.items, hashOf: (sh) => hashByShort.get(sh), changedFiles: new Set(files.map((f) => f.path)), cfg, buildPacks: aiReady })) };
+      impactPacks = impact.packs || []; delete impact.packs;
     } catch (e) { impact.error = e.message; }
     for (const it of review.items) {
       const im = it.impact; if (!im || !im.risk || it.state === 'superseded') continue;
       if (!(im.risk === 'high' || im.risk === 'critical' || (im.risk === 'medium' && it.tags.some((t) => t.id.startsWith('reg-'))))) continue;
       const first = it.lines.find((l) => l.k === '+') || it.lines[0];
-      add({ rule: 'REG-IMPACT', category: 'regression', severity: im.risk, file: it.file, line: first?.n || it.newStart, commit: it.commit,
-        message: `Modifica in «${im.fn || it.file}» (${it.tags.filter((t) => t.sev !== 'none').slice(0, 2).map((t) => t.label).join('; ')}): ${im.reasons.join('; ')}`, code: (first?.t || '').trim().slice(0, 160) });
+      im.findingId = add({ rule: 'REG-IMPACT', category: 'regression', severity: im.risk, file: it.file, line: first?.n || it.newStart, commit: it.commit,
+        message: `Modifica in «${im.fn || it.file}» (${it.tags.filter((t) => t.sev !== 'none').slice(0, 2).map((t) => t.label).join('; ')}): ${im.reasons.join('; ')}`, code: (first?.t || '').trim().slice(0, 160) }).id;
     }
   }
 
@@ -166,7 +168,23 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
 
   /* --- AI (opzionale, a budget) --- */
   const aiInfo = { privacy: { sendCode: cfg.privacy.sendCode, redact: cfg.privacy.redactSecrets, offline: cfg.privacy.offline }, used: false, provider: cfg.ai.provider, model: cfg.ai.model, maxContextTokens: cfg.budget.maxContextTokens, monthlyLimit: cfg.budget.monthlyTokens, spent: 0, calls: 0, cached: 0, estIn: 0, estOut: 0, in: 0, out: 0, skipped: 0, errors: [], note: '' };
-  if (useAI && cfg.ai.enabled && cfg.ai.model && !cfg.privacy.offline) {
+  if (aiReady) {
+    const usage = newUsage(cfg); const byFid = new Map(findings.map((f) => [f.id, f]));
+    /* (a) Revisione d'impatto a CONTESTO CHIUSO: l'AI vede solo funzione modificata, metodi collegati, chiamanti diretti e percorso all'endpoint */
+    const RW = { critical: 4, high: 3, medium: 2, low: 1 };
+    const packs = impactPacks.filter((p) => RW[p.risk] >= 2 || p.tags.length).sort((a, b) => RW[b.risk] - RW[a.risk]);
+    if (packs.length) {
+      onProgress('Revisione AI dell\'impatto (contesto chiuso)');
+      try {
+        const ir = await impactReview(cfg, packs, usage);
+        aiInfo.impactReviewed = ir.verdicts.size; aiInfo.impactSkipped = ir.skipped; aiInfo.errors.push(...ir.errors);
+        for (const pk of packs) {
+          const v = ir.verdicts.get(pk.key); if (!v) continue;
+          for (const id of pk.itemIds) { const it = review.items.find((x) => x.id === id); if (!it?.impact) continue; it.impact.ai = { v: v.v, why: v.why }; const f = byFid.get(it.impact.findingId); if (f) { f.ai = v.v === 'risk' ? 'confermato' : v.v === 'ok' ? 'falso positivo' : 'incerto'; f.aiNote = v.why; if (v.v === 'ok') { f.severityOriginal = f.severity; f.severity = 'info'; } } }
+          if (v.v === 'risk' && !pk.itemIds.some((id) => byFid.has(review.items.find((x) => x.id === id)?.impact?.findingId))) { const it = review.items.find((x) => x.id === pk.itemIds[0]); add({ source: 'ai', rule: 'AI-IMPACT', category: 'regression', severity: 'medium', file: pk.file, line: it?.newStart, commit: it?.commit, message: `Impatto di «${pk.fn}»: ${v.why || 'rischio segnalato dall\'AI'}`, ai: 'confermato' }); }
+        }
+      } catch (e) { aiInfo.errors.push(e.message); }
+    }
     onProgress('Triage AI (budget ' + cfg.budget.maxContextTokens + ' token/chiamata)');
     // Risparmio token: le regole "certe" (chiavi, conflitti...) NON vanno all'AI. Solo i casi ambigui,
     // poi le regressioni (simbolo+file), infine gli hunk rischiosi, finche' la quota lo permette.
@@ -175,7 +193,7 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     const items = []; const byId = new Map(findings.map((f) => [f.id, f]));
     const cut = (x, n) => String(x || '').trim().replace(/\s+/g, ' ').slice(0, n);
     for (const f of findings) {
-      if (CERTAIN.has(f.rule) || SEV[f.severity] < 3) continue;
+      if (CERTAIN.has(f.rule) || SEV[f.severity] < 3 || f.ai) continue; // gia' valutata dall'AI nel contesto chiuso
       if (f.rule === 'REG-IMPACT') items.push({ id: f.id, priority: 160, text: `${f.id}|${path.basename(f.file)}|${cut(f.message, 100)}` });
       else if (f.code && f.line) items.push({ id: f.id, priority: 200 + SEV[f.severity], text: `${f.id}|${path.basename(f.file)}:${f.line}|${noCode ? f.rule : cut(f.code, 90)}` });
       else if (f.rule.startsWith('REG-')) items.push({ id: f.id, priority: 150, text: `${f.id}|${path.basename(f.file)}|${noCode ? f.rule : cut(f.message, 90)}` });
@@ -193,14 +211,15 @@ export async function analyze({ repo, branch, base, docs = [], useAI = true, onP
     const kw = [...files.map((f) => path.basename(f.path).replace(/\.\w+$/, '')), ...commits.flatMap((c) => c.subject.split(/\W+/))];
     const docsText = noCode ? '' : retrieveDocs(docs, kw, cfg.budget.docTokens);
     try {
-      const r = await triage(cfg, items, docsText, { snippet: (f, a, b) => G.showLines(repo, TO, f, a, b) });
-      Object.assign(aiInfo, { used: true, ...r.usage, skipped: r.skipped, errors: r.errors });
+      const r = await triage(cfg, items, docsText, { snippet: (f, a, b) => G.showLines(repo, TO, f, a, b) }, usage);
+      Object.assign(aiInfo, { used: true, ...r.usage, skipped: r.skipped + (aiInfo.impactSkipped || 0), errors: [...aiInfo.errors, ...r.errors] });
       for (const [id, why] of r.bug) {
         const f = byId.get(id);
         if (f) { f.ai = 'confermato'; f.aiNote = why; } else { const it = items.find((i) => i.id === id); if (it && it.file) add({ source: 'ai', rule: 'AI-REVIEW', category: 'error', severity: 'medium', file: it.file, line: it.line, message: 'Possibile problema segnalato dall\'AI (da verificare)', code: it.code }); }
       }
       for (const id of r.fp) { const f = byId.get(id); if (f) { f.ai = 'falso positivo'; f.severityOriginal = f.severity; f.severity = 'info'; } }
     } catch (e) { aiInfo.errors.push(e.message); }
+    if (!aiInfo.used) Object.assign(aiInfo, { used: usage.calls + usage.cached > 0, ...usage, errors: aiInfo.errors });
   } else aiInfo.note = cfg.privacy.offline ? 'Modalità offline: nessun dato lascia il PC.' : useAI ? 'AI non abilitata/configurata: analisi solo statica (0 token).' : 'AI disattivata per questa analisi.';
 
   findings.sort((a, b) => SEV[b.severity] - SEV[a.severity]);

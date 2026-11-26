@@ -65,8 +65,19 @@ export function enclosing(lines, idx, file) {
   return { type: 'module' };
 }
 
-export async function computeImpact({ repo, ref, items, hashOf, changedFiles, cfg }) {
-  const o = cfg.analysis.impact; const out = { endpoints: new Map(), analyzed: 0, skipped: 0, notes: [] };
+/** Corpo di una funzione: dalla riga di definizione fino al primo rientro <= indentazione (max n righe). */
+export function bodyRange(lines, defIdx, max = 40) {
+  const base = indent(lines[defIdx] || ''); const out = [lines[defIdx]];
+  for (let i = defIdx + 1; i < lines.length && out.length < max; i++) {
+    const l = lines[i]; out.push(l);
+    if (l.trim() && indent(l) <= base) break; // chiusura (}) o prossima definizione
+  }
+  return out.map((l) => l.replace(/\s+$/, '').slice(0, 140));
+}
+const CALL_RE = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+
+export async function computeImpact({ repo, ref, items, hashOf, changedFiles, cfg, buildPacks = false }) {
+  const o = cfg.analysis.impact; const out = { endpoints: new Map(), analyzed: 0, skipped: 0, notes: [] }; const packs = new Map();
   const cache = new Map();
   const read = async (r, f) => { const k = r + '|' + f; if (!cache.has(k)) cache.set(k, (await G.readFileAt(repo, r, f)).split('\n')); return cache.get(k); };
   const fnCache = new Map();
@@ -83,7 +94,7 @@ export async function computeImpact({ repo, ref, items, hashOf, changedFiles, cf
       if (/^\s*(import|from|export\s*\{|#include|using|require)\b/.test(h.text) && !/\(/.test(h.text.replace(/^\s*import[^(]*/, ''))) continue; // solo import
       const lines = await read(ref, h.file);
       const enc = enclosing(lines, h.line - 1, h.file);
-      res.push({ file: h.file, line: h.line, enc });
+      res.push({ file: h.file, line: h.line, enc, text: h.text });
       if (res.length >= 25) break;
     }
     return { res, tests };
@@ -92,7 +103,7 @@ export async function computeImpact({ repo, ref, items, hashOf, changedFiles, cf
   async function trace(start) {
     const key = start.file + '|' + start.name;
     if (fnCache.has(key)) return fnCache.get(key);
-    const result = { endpoints: [], callers: 0, untouched: new Set(), tests: new Set(), generic: false, depthHit: false, nodes: 0, modules: 0 };
+    const result = { direct: [], endpoints: [], callers: 0, untouched: new Set(), tests: new Set(), generic: false, depthHit: false, nodes: 0, modules: 0 };
     fnCache.set(key, result);
     const seen = new Set([key]);
     let frontier = [{ name: start.name, file: start.file, chain: [start.name] }];
@@ -105,6 +116,7 @@ export async function computeImpact({ repo, ref, items, hashOf, changedFiles, cf
         tests.forEach((t) => result.tests.add(t));
         for (const c of res) {
           result.callers++;
+          if (depth === 0 && result.direct.length < 4) result.direct.push({ name: c.enc.type === 'fn' ? c.enc.name : c.enc.type === 'endpoint' ? c.enc.label : '(modulo)', file: c.file, line: c.line, defLine: c.enc.type === 'fn' ? c.enc.line : 0, text: (c.text || '').trim().slice(0, 140) });
           if (!changedFiles.has(c.file)) result.untouched.add(`${c.file}:${c.line}`);
           if (c.enc.type === 'endpoint') { result.endpoints.push({ kind: c.enc.kind, label: c.enc.label, file: c.file, line: c.enc.line, chain: [...node.chain, ...(c.enc.handler && c.enc.handler !== node.name ? [c.enc.handler] : [])] }); continue; }
           if (c.enc.type === 'module') { result.modules++; continue; }
@@ -158,6 +170,30 @@ export async function computeImpact({ repo, ref, items, hashOf, changedFiles, cf
     else if (!eps.length && tagSev >= 4 && tr.callers) risk = 'medium';
     if (risk === 'high' && tests.length >= 2 && tagSev < 5 && tr.untouched.size === 0) risk = 'medium';
     it.impact = { fn: enc.type === 'fn' ? enc.name : enc.handler || null, risk, reasons, endpoints: eps.slice(0, 8), callers: tr.callers, untouched: [...tr.untouched].slice(0, 8), tests, unresolvedModules: tr.modules || 0, truncated: !!tr.depthHit };
+    if (buildPacks && (enc.type === 'fn' || enc.type === 'endpoint')) {
+      const key = it.file + '|' + (it.impact.fn || enc.label || '');
+      let pk = packs.get(key);
+      if (!pk) {
+        const defIdx = enc.type === 'fn' ? enc.line - 1 : -1;
+        const body = defIdx >= 0 ? bodyRange(lines, defIdx, 40) : [];
+        const self = enc.type === 'fn' ? enc.name : '';
+        const names = []; for (const m of body.slice(1).join('\n').matchAll(CALL_RE)) { const n = m[1]; if (n !== self && n.length >= 3 && !KEYWORDS.test(n) && !GENERIC.has(n) && !names.includes(n)) names.push(n); if (names.length >= 8) break; }
+        const callees = [];
+        for (const n of names) {
+          if (callees.length >= 4) break;
+          const hit = (await G.grepLines(repo, ref, n, 60)).find((h) => !isTest(h.file) && defAt(h.text)?.name === n);
+          if (hit) callees.push({ name: n, sig: hit.text.trim().slice(0, 120), file: hit.file, line: hit.line });
+        }
+        const callersP = tr.direct.map((d) => ({ name: d.name, callText: d.text, file: d.file, line: d.defLine }));
+        const allow = new Set([...callees.map((c) => c.name), ...callersP.filter((c) => c.line).map((c) => c.name)]);
+        pk = { key, itemIds: [], file: it.file, fn: it.impact.fn || enc.label, sig: defIdx >= 0 ? lines[defIdx].trim().slice(0, 140) : '', body, diff: [], tags: [], callees, callers: callersP.map((c) => ({ name: c.name, callText: c.callText })), endpoints: eps.slice(0, 3), tests: tests.length, untouched: tr.untouched.size, risk, allow,
+          bodyOf: async (name) => { const t = callees.find((c) => c.name === name) || callersP.find((c) => c.name === name && c.line); if (!t) return []; const ls = await read(ref, t.file); const di = t.line - 1; return di >= 0 && di < ls.length ? bodyRange(ls, di, 25) : []; } };
+        packs.set(key, pk);
+      }
+      pk.itemIds.push(it.id);
+      for (const l of it.lines) if (pk.diff.length < 14) pk.diff.push(`${l.k}${l.t.trim().slice(0, 130)}`);
+      for (const t of it.tags) if (t.sev !== 'none' && !pk.tags.includes(t.label)) pk.tags.push(t.label);
+    }
     for (const e of eps) {
       const k = e.label + '|' + e.file;
       const cur = out.endpoints.get(k) || { label: e.label, kind: e.kind, file: e.file, line: e.line, items: [], chains: [], risk: 'low' };
@@ -168,5 +204,5 @@ export async function computeImpact({ repo, ref, items, hashOf, changedFiles, cf
       out.endpoints.set(k, cur);
     }
   }
-  return { endpoints: [...out.endpoints.values()].sort((a, b) => ({ critical: 4, high: 3, medium: 2, low: 1 }[b.risk] - { critical: 4, high: 3, medium: 2, low: 1 }[a.risk])), analyzed: out.analyzed, skipped: out.skipped };
+  return { packs: [...packs.values()], endpoints: [...out.endpoints.values()].sort((a, b) => ({ critical: 4, high: 3, medium: 2, low: 1 }[b.risk] - { critical: 4, high: 3, medium: 2, low: 1 }[a.risk])), analyzed: out.analyzed, skipped: out.skipped };
 }
