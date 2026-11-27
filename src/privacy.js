@@ -20,13 +20,13 @@ export function allowedDestinations(cfg = loadConfig()) {
   const out = [];
   const host = (u) => { try { return new URL(u).hostname; } catch { return null; } };
   if (cfg.privacy.offline) return { offline: true, destinations: [] };
-  if (cfg.ai.enabled && cfg.ai.provider === 'copilot') out.push({ purpose: 'ai-token', host: host(cfg.ai.copilotTokenUrl), sends: 'solo il tuo token GitHub, per ottenere il token Copilot (nessun codice)' });
-  if (cfg.ai.enabled && cfg.ai.baseUrl) out.push({ purpose: 'ai', host: host(cfg.ai.baseUrl), sends: cfg.privacy.sendCode ? 'frammenti di codice minimi (segreti oscurati) + documenti scelti da te' : 'solo metadati (nome file, tipo di segnalazione): nessun codice' });
+  if (cfg.ai.enabled && cfg.ai.provider === 'copilot') out.push({ purpose: 'ai', host: 'api.githubcopilot.com / api.github.com (tramite Copilot SDK)', sends: (cfg.privacy.sendCode ? 'frammenti di codice minimi (segreti oscurati) + regole del documento' : 'solo metadati') + '. SDK senza strumenti: non legge file né esegue comandi. Le richieste del livello-modello sono filtrate e registrate; autenticazione e telemetria interna dell\'SDK non sono intercettabili dal tool' });
+  else if (cfg.ai.enabled && cfg.ai.baseUrl) out.push({ purpose: 'ai', host: host(cfg.ai.baseUrl), sends: cfg.privacy.sendCode ? 'frammenti di codice minimi (segreti oscurati) + documenti scelti da te' : 'solo metadati (nome file, tipo di segnalazione): nessun codice' });
   if (cfg.analysis.cve.enabled) out.push({ purpose: 'cve', host: host(cfg.analysis.cve.osvUrl), sends: 'solo nome pacchetto + versione delle dipendenze modificate: nessun codice' });
   return { offline: false, destinations: out.filter((d) => d.host) };
 }
 
-function logEgress(e) {
+export function logEgress(e) {
   try { fs.mkdirSync(DATA, { recursive: true, mode: 0o700 }); fs.appendFileSync(LOG(), JSON.stringify({ t: new Date().toISOString(), ...e }) + '\n', { mode: 0o600 }); } catch { /* best effort */ }
 }
 export function readEgressLog(n = 100) {
@@ -37,7 +37,7 @@ export async function guardedFetch(url, opts, purpose) {
   const cfg = loadConfig(); const u = new URL(url);
   const deny = (why) => { logEgress({ purpose, host: u.hostname, blocked: why }); throw new Error(`Uscita di rete bloccata (${why}): ${u.hostname}`); };
   if (cfg.privacy.offline) deny('modalita offline attiva');
-  const expected = purpose === 'ai-token' && cfg.ai.provider === 'copilot' ? cfg.ai.copilotTokenUrl : purpose === 'ai' ? cfg.ai.baseUrl : purpose === 'cve' && cfg.analysis.cve.enabled ? cfg.analysis.cve.osvUrl : null;
+  const expected = purpose === 'ai' ? cfg.ai.baseUrl : purpose === 'cve' && cfg.analysis.cve.enabled ? cfg.analysis.cve.osvUrl : null;
   if (!expected) deny('scopo non autorizzato');
   if (new URL(expected).host !== u.host) deny('host diverso da quello configurato');
   if (u.protocol !== 'https:' && !isLocalHost(u.hostname) && !cfg.privacy.allowHttp) deny('connessione non cifrata (http) verso host non locale');

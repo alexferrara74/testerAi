@@ -174,22 +174,49 @@ test('privacy: uscite solo verso AI configurata, segreti oscurati, offline e sen
   srv.close();
 });
 
-test('provider GitHub Copilot: scambio token poi chat, solo host configurati', async () => {
-  const calls = [];
-  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (c) => b += c); req.on('end', () => {
-    calls.push({ url: req.url, auth: req.headers.authorization, integ: req.headers['copilot-integration-id'] }); res.setHeader('content-type', 'application/json');
-    if (req.url === '/copilot_internal/v2/token') return res.end(JSON.stringify({ token: 'tid=copilot-short', expires_at: Math.floor(Date.now() / 1000) + 1500 }));
-    res.end(JSON.stringify({ choices: [{ message: { content: '{"b":[],"f":[],"a":[]}' } }], usage: { prompt_tokens: 30, completion_tokens: 4 } })); }); }).listen(0);
-  const root = `http://127.0.0.1:${srv.address().port}`;
-  const { callModel } = await import('../src/ai.js'); const { loadConfig } = await import('../src/config.js');
-  saveConfig({ ai: { enabled: true, provider: 'copilot', baseUrl: root, copilotTokenUrl: root + '/copilot_internal/v2/token', model: 'gpt-4o', apiKey: 'ghu_oauth' } });
-  const ai = loadConfig().ai; assert.equal(ai.provider, 'copilot');
-  const r = await callModel(ai, 'sys', 'hi', 20); await callModel(ai, 'sys', 'hi', 20);
-  assert.equal(r.tin, 30);
-  assert.equal(calls[0].auth, 'token ghu_oauth'); assert.equal(calls[1].url, '/chat/completions');
-  assert.equal(calls[1].auth, 'Bearer tid=copilot-short'); assert.equal(calls[1].integ, 'vscode-chat');
-  assert.equal(calls.filter((c) => c.url.includes('v2/token')).length, 1, 'token Copilot messo in cache');
-  srv.close();
+test('provider GitHub Copilot via SDK ufficiale: token dal FE, contesto chiuso senza strumenti, modelli, guard', async () => {
+  const { setSdkLoader, stopCopilot } = await import('../src/copilot.js'); const { callModel, listModels } = await import('../src/ai.js'); const { loadConfig, DATA } = await import('../src/config.js'); const { readEgressLog } = await import('../src/privacy.js');
+  const seen = { clientOpts: null, sessionOpts: null, prompt: '', started: 0, disconnected: 0 };
+  class FakeHandler { async sendRequest() { return new Response('{}', { status: 200 }); } }
+  class FakeClient {
+    constructor(o) { seen.clientOpts = o; } async start() { seen.started++; } async stop() {} async forceStop() {}
+    async listModels() { return [{ id: 'gpt-4o', name: 'GPT-4o' }, { id: 'claude-sonnet-4', name: 'Claude Sonnet 4' }]; }
+    async createSession(o) { seen.sessionOpts = o; const hs = []; return { on: (h) => hs.push(h), sendAndWait: async (m) => { seen.prompt = m.prompt; hs.forEach((h) => h({ type: 'assistant.usage', data: { inputTokens: 120, outputTokens: 12 } })); return { data: { content: '{"b":[],"f":[],"a":[]}' } }; }, disconnect: async () => { seen.disconnected++; } }; }
+  }
+  const fake = { CopilotClient: FakeClient, CopilotRequestHandler: FakeHandler, RuntimeConnection: { forInProcess: (o) => ({ kind: 'in-process', ...o }) } };
+  setSdkLoader(async () => fake);
+  const set = (ai) => { saveConfig({ ai: { enabled: true, provider: 'copilot', model: 'gpt-4o', apiKey: 'github_pat_abc123', ...ai }, privacy: { offline: false, proxyUrl: '' } }); return loadConfig().ai; };
+  const ai = set({});
+  const r = await callModel(ai, 'SYS PROMPT', 'USER PROMPT', 20);
+  assert.equal(r.text, '{"b":[],"f":[],"a":[]}'); assert.equal(r.tin, 120); assert.equal(r.tout, 12);
+  // accesso: SOLO il token del FE, nessun login/ambiente locale; nessuna funzione ambientale
+  assert.equal(seen.clientOpts.mode, 'empty'); assert.deepEqual(seen.clientOpts.github, { token: 'github_pat_abc123', useLoggedInUser: false });
+  assert.ok(seen.clientOpts.runtime.baseDirectory.startsWith(DATA), 'stato SDK fuori dal progetto');
+  // contesto chiuso: nessuno strumento, permessi negati, system message sostituito, cartella vuota privata
+  assert.deepEqual(seen.sessionOpts.tools.availableTools, []);
+  assert.equal(seen.sessionOpts.permissions.onRequest({}).kind, 'reject');
+  assert.deepEqual(seen.sessionOpts.systemMessage, { mode: 'replace', content: 'SYS PROMPT' });
+  assert.equal(seen.sessionOpts.model, 'gpt-4o'); assert.ok(seen.sessionOpts.workingDirectory.startsWith(DATA));
+  assert.equal(seen.prompt, 'USER PROMPT'); assert.equal(seen.disconnected, 1);
+  // elenco modelli
+  assert.deepEqual((await listModels(ai)).map((m) => m.id), ['claude-sonnet-4', 'gpt-4o']);
+  assert.equal(seen.started, 1, 'client riusato');
+  // guard sul livello-modello: host Copilot ok, altri bloccati e registrati
+  const h = seen.clientOpts.models.requestHandler;
+  const ok = await h.sendRequest(new Request('https://api.githubcopilot.com/chat/completions', { method: 'POST', body: '{}' }), { url: 'https://api.githubcopilot.com/chat/completions' });
+  assert.equal(ok.status, 200);
+  await assert.rejects(h.sendRequest(new Request('https://evil.example.com/x'), { url: 'https://evil.example.com/x' }), /bloccata/);
+  assert.ok(readEgressLog().some((e) => e.host === 'evil.example.com' && e.blocked) && readEgressLog().some((e) => e.via === 'copilot-sdk'));
+  // token: obbligatorio, ghp_ classico rifiutato
+  await assert.rejects(callModel(set({ apiKey: '' }), 's', 'u', 5), /Manca il token GitHub/);
+  await assert.rejects(callModel(set({ apiKey: 'ghp_classic' }), 's', 'u', 5), /ghp_/);
+  // offline: nessuna connessione
+  await stopCopilot(); const aiOff = set({}); saveConfig({ privacy: { offline: true } });
+  await assert.rejects(callModel(aiOff, 's', 'u', 5), /offline/i); saveConfig({ privacy: { offline: false } });
+  // SDK non installato: messaggio con il comando
+  setSdkLoader(async () => { throw new Error('Cannot find package'); });
+  await assert.rejects(callModel(set({}), 's', 'u', 5), /npm install @microsoft\/copilot-sdk/);
+  setSdkLoader(async () => { throw new Error('x'); }); await stopCopilot();
 });
 
 test('impatto: dalla modifica in un punto esistente risale fino all\'endpoint; modifiche locali incluse', async () => {
@@ -275,7 +302,7 @@ test('AI sull\'impatto: contesto chiuso (solo funzione, callee, chiamanti, perco
   srv.close();
 });
 
-test('rete: causa reale invece di "fetch failed", proxy aziendale, diagnostica Copilot', async () => {
+test('rete: causa reale invece di "fetch failed", proxy aziendale, diagnostica', async () => {
   const { guardedFetch } = await import('../src/privacy.js'); const { diagnose } = await import('../src/ai.js'); const { loadConfig } = await import('../src/config.js');
   // 1) host irraggiungibile -> codice di errore leggibile, non "fetch failed"
   saveConfig({ privacy: { offline: false, proxyUrl: '' }, ai: { enabled: true, provider: 'openai', baseUrl: 'http://127.0.0.1:1/v1', model: 'm', apiKey: 'k' } });
@@ -289,10 +316,10 @@ test('rete: causa reale invece di "fetch failed", proxy aziendale, diagnostica C
   // 3) https via proxy: il tunnel CONNECT viene richiesto; rifiuto del proxy spiegato
   let connectTo = '';
   const proxy2 = http.createServer(() => {}); proxy2.on('connect', (req, sock) => { connectTo = req.url; sock.end('HTTP/1.1 403 Forbidden\r\n\r\n'); }); proxy2.listen(0);
-  saveConfig({ ai: { baseUrl: 'https://api.githubcopilot.com', provider: 'copilot', copilotTokenUrl: 'https://api.github.com/copilot_internal/v2/token', apiKey: 'ghu_x', enabled: true }, privacy: { proxyUrl: `http://127.0.0.1:${proxy2.address().port}` } });
+  saveConfig({ ai: { baseUrl: 'https://llm.example.com/v1', provider: 'openai', apiKey: 'k', enabled: true }, privacy: { proxyUrl: `http://127.0.0.1:${proxy2.address().port}` } });
   const steps = await diagnose(loadConfig());
-  assert.equal(connectTo, 'api.github.com:443');
-  assert.ok(steps[0].ok && !steps[1].ok && /proxy/i.test(steps[1].detail) && steps.length === 2, JSON.stringify(steps));
+  assert.equal(connectTo, 'llm.example.com:443');
+  assert.ok(steps.length === 1 && !steps[0].ok && /proxy/i.test(steps[0].detail), JSON.stringify(steps));
   saveConfig({ privacy: { proxyUrl: '' } }); proxy.close(); proxy2.close();
 });
 
@@ -308,14 +335,11 @@ test('elenco modelli per provider (si sceglie, non si digita) e nessun auto-toke
     res.statusCode = 404; res.end('{}'); }).listen(0);
   const root = `http://127.0.0.1:${srv.address().port}`;
   const set = (ai) => { saveConfig({ ai: { enabled: true, apiKey: 'k', ...ai } }); return loadConfig().ai; };
-  let m = await listModels(set({ provider: 'copilot', baseUrl: root, copilotTokenUrl: root + '/copilot_internal/v2/token', apiKey: 'ghu_x' }));
-  assert.deepEqual(m.map((x) => x.id), ['claude-sonnet', 'gpt-4o'], 'solo modelli chat, senza duplicati');
+  let m;
   m = await listModels(set({ provider: 'anthropic', baseUrl: root })); assert.deepEqual(m, [{ id: 'claude-x', name: 'Claude X' }]); assert.equal(reqs.at(-1).key, 'k');
   m = await listModels(set({ provider: 'ollama', baseUrl: root })); assert.deepEqual(m.map((x) => x.id), ['llama3', 'qwen2.5-coder']);
   m = await listModels(set({ provider: 'openai', baseUrl: root + '/v1' })); assert.deepEqual(m.map((x) => x.id), ['gpt-4.1', 'gpt-4o-mini'], 'esclusi embedding/whisper');
   await assert.rejects(listModels(set({ provider: 'openai', baseUrl: root + '/nope' })), (e) => /404/.test(e.message) && !!e.hint);
-  // il login locale di Copilot non viene piu' letto: senza apiKey errore esplicito
-  await assert.rejects(listModels(set({ provider: 'copilot', baseUrl: root, copilotTokenUrl: root + '/copilot_internal/v2/token', apiKey: '' })), /campo API key/);
   srv.close();
 });
 

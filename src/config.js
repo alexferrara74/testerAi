@@ -18,7 +18,6 @@ export const DEFAULTS = {
     authHeader: 'Authorization', // es. "api-key" per Azure
     authScheme: 'Bearer',        // vuoto = solo chiave
     extraHeaders: {},
-    copilotTokenUrl: 'https://api.github.com/copilot_internal/v2/token', // solo provider copilot (GHE: tuo host)
     apiVersion: '',              // Azure: ?api-version=
     temperature: 0,
     timeoutMs: 60000,

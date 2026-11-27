@@ -7,25 +7,11 @@ import { remaining, record, readUsage } from './usage.js';
 import { guardedFetch, redact } from './privacy.js';
 import { loadConfig } from './config.js';
 import { pickRules, briefText } from './docs.js';
-
-/* ---------------- GitHub Copilot: scambio token ---------------- */
-// Il token GitHub (OAuth Copilot) lo inserisci TU nel campo API key: non viene letto automaticamente dal PC.
-// Si scambia con un token Copilot di breve durata. L'endpoint di scambio non e' documentato come API pubblica.
-const ctok = new Map();
-async function copilotToken(ai) {
-  const oauth = ai.apiKey;
-  if (!oauth) throw new Error('Copilot: manca il token GitHub (inseriscilo nel campo API key)');
-  const hit = ctok.get(oauth); if (hit && hit.exp - 60e3 > Date.now()) return hit.token;
-  const res = await guardedFetch(ai.copilotTokenUrl, { method: 'GET', headers: { authorization: `token ${oauth}`, accept: 'application/json', 'user-agent': 'GitHubCopilotChat/0.22.0', 'editor-version': 'vscode/1.95.0' }, signal: AbortSignal.timeout(ai.timeoutMs || 60000) }, 'ai-token');
-  const raw = await res.text();
-  if (!res.ok) throw new Error(`Copilot token ${res.status}: verifica che l'account abbia una licenza Copilot attiva (${raw.slice(0, 120)})`);
-  const j = JSON.parse(raw); if (!j.token) throw new Error('Copilot: risposta senza token');
-  ctok.set(oauth, { token: j.token, exp: (j.expires_at || 0) * 1000 || Date.now() + 20 * 60e3 });
-  return j.token;
-}
+import { copilotChat, copilotModels, sdkStatus, checkToken } from './copilot.js';
 
 /* ---------------- Provider layer ---------------- */
 export async function callModel(ai, system, user, maxOut) {
+  if (ai.provider === 'copilot') return copilotChat(loadConfig(), system, user); // SDK ufficiale: contesto chiuso, nessuno strumento
   const headers = { 'content-type': 'application/json', ...(ai.extraHeaders || {}) };
   let url, body;
   const base = ai.baseUrl.replace(/\/+$/, '');
@@ -37,10 +23,6 @@ export async function callModel(ai, system, user, maxOut) {
   } else if (ai.provider === 'ollama') {
     url = `${base}/api/chat`;
     body = { model: ai.model, stream: false, options: { temperature: ai.temperature, num_predict: maxOut }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
-  } else if (ai.provider === 'copilot') {
-    url = `${base}/chat/completions`;
-    Object.assign(headers, { authorization: `Bearer ${await copilotToken(ai)}`, 'editor-version': 'vscode/1.95.0', 'editor-plugin-version': 'copilot-chat/0.22.0', 'copilot-integration-id': 'vscode-chat', 'user-agent': 'GitHubCopilotChat/0.22.0' });
-    body = { model: ai.model, max_tokens: maxOut, temperature: ai.temperature, stream: false, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
   } else {
     url = `${base}/chat/completions${ai.apiVersion ? `?api-version=${encodeURIComponent(ai.apiVersion)}` : ''}`;
     if (ai.apiKey) headers[ai.authHeader || 'Authorization'] = ai.authScheme ? `${ai.authScheme} ${ai.apiKey}` : ai.apiKey;
@@ -207,9 +189,9 @@ export async function diagnose(cfg) {
   const host = (u) => { try { return new URL(u).host; } catch { return u; } };
   const step = async (name, fn) => { try { steps.push({ name, ok: true, detail: (await fn()) || '' }); return true; } catch (e) { steps.push({ name, ok: false, detail: e.message, hint: e.hint || '' }); return false; } };
   if (ai.provider === 'copilot') {
-    if (!(await step('Token GitHub', async () => { if (ai.apiKey) return 'API key impostata'; throw new Error('nessun token: inseriscilo nel campo API key'); }))) return steps;
-    ctok.clear();
-    if (!(await step(`Scambio token con GitHub (${host(ai.copilotTokenUrl)})`, async () => { await copilotToken(ai); return 'token Copilot ottenuto: licenza valida'; }))) return steps;
+    if (!(await step('SDK Copilot installato', async () => { const st = await sdkStatus(); if (!st.installed) throw Object.assign(new Error('non installato: npm install @microsoft/copilot-sdk'), { hint: 'Poi riavvia il servizio. Serve Node ≥ 20.19 / 22.12.' }); return `@microsoft/copilot-sdk ${st.version}`; }))) return steps;
+    if (!(await step('Token GitHub', async () => { checkToken(ai.apiKey); return `${ai.apiKey.slice(0, 4)}… inserito dal FE (nessun login locale usato)`; }))) return steps;
+    if (!(await step('Autenticazione e modelli (account con licenza Copilot)', async () => { const m = await copilotModels(loadConfig()); return `${m.length} modelli disponibili`; }))) return steps;
   }
   await step(`Chiamata al modello (${host(ai.baseUrl)})`, async () => { const r = await callModel(ai, 'Reply {}', 'x', 5); record((r.tin || 0) + (r.tout || 0) || 15, 'test'); return `risposta ricevuta (${(r.tin || 0) + (r.tout || 0) || '~15'} token)`; });
   return steps;
@@ -217,6 +199,7 @@ export async function diagnose(cfg) {
 
 /** Elenco dei modelli disponibili per il provider configurato (0 token: e' una GET sull'host gia' consentito). */
 export async function listModels(ai) {
+  if (ai.provider === 'copilot') return copilotModels(loadConfig());
   const base = ai.baseUrl.replace(/\/+$/, ''); const u = new URL(base);
   const headers = { accept: 'application/json', ...(ai.extraHeaders || {}) };
   let url, parse;
@@ -226,10 +209,6 @@ export async function listModels(ai) {
     parse = (j) => arr(j).map((m) => ({ id: m.id, name: m.display_name || m.id }));
   } else if (ai.provider === 'ollama') {
     url = `${base}/api/tags`; parse = (j) => arr(j).map((m) => ({ id: m.name, name: m.name }));
-  } else if (ai.provider === 'copilot') {
-    url = `${base}/models`;
-    Object.assign(headers, { authorization: `Bearer ${await copilotToken(ai)}`, 'editor-version': 'vscode/1.95.0', 'copilot-integration-id': 'vscode-chat', 'user-agent': 'GitHubCopilotChat/0.22.0' });
-    parse = (j) => arr(j).filter((m) => !m.capabilities || m.capabilities.type === 'chat').filter((m) => m.model_picker_enabled !== false).map((m) => ({ id: m.id, name: m.name || m.id }));
   } else {
     if (ai.apiKey) headers[ai.authHeader || 'Authorization'] = ai.authScheme ? `${ai.authScheme} ${ai.apiKey}` : ai.apiKey;
     if (u.hostname === 'models.github.ai') { url = `${u.origin}/catalog/models`; parse = (j) => arr(j).map((m) => ({ id: m.id, name: m.name || m.id })); }

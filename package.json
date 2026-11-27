@@ -4,9 +4,14 @@
   "description": "Microservizio BE+FE per analizzare branch/commit git (vulnerabilita', errori, regressioni) con AI a basso consumo di token",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test --test-force-exit test/*.test.js"
+  },
+  "optionalDependencies": {
+    "@microsoft/copilot-sdk": "^2.0.3"
   }
 }

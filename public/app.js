@@ -262,14 +262,22 @@ function item(i) {
 
 /* ---------- config ---------- */
 const PRESETS = {
-  copilot: { v: { provider: 'copilot', baseUrl: 'https://api.githubcopilot.com', model: 'gpt-4o', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '', copilotTokenUrl: 'https://api.github.com/copilot_internal/v2/token' }, h: 'Serve una licenza GitHub Copilot. Inserisci nel campo API key il token GitHub (OAuth Copilot, es. ghu_…): non viene mai letto in automatico dal PC. Poi premi «Carica modelli». Copilot Business/Enterprise: cambia Base URL in https://api.business.githubcopilot.com o https://api.enterprise.githubcopilot.com. Integrazione non-ufficiale: verifica che le policy aziendali/ToS la consentano.' },
+  copilot: { v: { provider: 'copilot', baseUrl: '', model: '', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: 'Copilot non usa API key: tramite l\'SDK ufficiale Microsoft/GitHub inserisci qui sotto un token GitHub (OAuth gho_/ghu_ oppure PAT fine-grained github_pat_; i ghp_ classici non sono supportati) di un account con licenza Copilot. Nessun login o variabile d\'ambiente del PC viene letto. Poi premi «Carica modelli». L\'agente gira SENZA strumenti: non può leggere file né eseguire comandi.' },
   ghmodels: { v: { provider: 'openai', baseUrl: 'https://models.github.ai/inference', model: 'openai/gpt-4.1-mini', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: 'API ufficiale GitHub Models: API key = Personal Access Token con permesso models:read.' },
   azure: { v: { provider: 'openai', baseUrl: 'https://<risorsa>.openai.azure.com/openai/deployments/<deployment>', model: '<deployment>', authHeader: 'api-key', authScheme: '', apiVersion: '2024-10-21' }, h: 'Sostituisci <risorsa> e <deployment>.' },
   openai: { v: { provider: 'openai', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: '' },
   anthropic: { v: { provider: 'anthropic', baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-4-5', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: 'API key Anthropic nel campo API key.' },
   ollama: { v: { provider: 'ollama', baseUrl: 'http://127.0.0.1:11434', model: 'qwen2.5-coder', authHeader: 'Authorization', authScheme: 'Bearer', apiVersion: '' }, h: 'Modello locale: nessun dato lascia il PC.' },
 };
-$('c_preset').onchange = () => { const p = PRESETS[$('c_preset').value]; if (!p) return; for (const [k, v] of Object.entries(p.v)) $('c_' + k).value = v; manualModel('Inserisci la API key e premi «Carica modelli»'); $('c_presetHint').textContent = p.h; $('c_enabled').checked = true; };
+async function providerUi() {
+  const cop = $('c_provider').value === 'copilot';
+  document.querySelectorAll('.nc').forEach((e) => e.classList.toggle('hide', cop));
+  $('l_key').textContent = cop ? 'Token GitHub (gho_… / ghu_… / github_pat_…)' : 'API key';
+  $('c_sdk').textContent = '';
+  if (cop) { try { const st = await api('/api/copilot/status'); $('c_sdk').innerHTML = st.installed ? `✔ SDK Copilot installato (v${esc(st.version)}). Accesso: solo il token qui sopra.` : '⚠ SDK Copilot non installato: esegui <span class="mono">npm install @microsoft/copilot-sdk</span> nella cartella del progetto e riavvia il servizio.'; } catch {} }
+}
+$('c_provider').onchange = providerUi;
+$('c_preset').onchange = () => { const p = PRESETS[$('c_preset').value]; if (!p) return; for (const [k, v] of Object.entries(p.v)) $('c_' + k).value = v; manualModel('Inserisci le credenziali e premi «Carica modelli»'); providerUi(); $('c_presetHint').textContent = p.h; $('c_enabled').checked = true; };
 /* ----- elenco modelli dal provider: si sceglie, non si digita ----- */
 const modelValue = () => ($('c_modelSel').classList.contains('hide') ? $('c_model').value : $('c_modelSel').value);
 function showModels(list, current) {
@@ -279,6 +287,7 @@ function showModels(list, current) {
   sel.classList.remove('hide'); $('c_model').classList.add('hide'); $('c_modelHint').textContent = `${list.length} modelli disponibili`;
 }
 function manualModel(msg) { $('c_modelSel').classList.add('hide'); $('c_model').classList.remove('hide'); $('c_modelHint').textContent = msg || ''; }
+async function saveAi() { const ai = { enabled: true, extraHeaders: $('c_extraHeaders').value || '{}' }; AIF.forEach((k) => ai[k] = $('c_' + k).value); ai.model = modelValue(); ai.timeoutMs = +ai.timeoutMs || 60000; await post('/api/config', { ai }, 'PUT'); $('c_enabled').checked = true; privacy(); }
 async function loadModels(silent) {
   $('c_modelHint').textContent = 'caricamento…';
   try {
@@ -290,13 +299,13 @@ async function loadModels(silent) {
   } catch (e) { manualModel(e.message); if (!silent) toast('❌ ' + e.message); }
 }
 $('c_load').onclick = () => loadModels(false);
-const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'copilotTokenUrl', 'timeoutMs'], BF = ['strategy', 'monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
+const AIF = ['provider', 'baseUrl', 'model', 'apiKey', 'authHeader', 'authScheme', 'apiVersion', 'timeoutMs'], BF = ['strategy', 'monthlyTokens', 'perAnalysisTokens', 'maxContextTokens', 'maxOutputTokens', 'maxCalls', 'maxRounds', 'docTokens'];
 async function loadCfg() {
   quota(); privacy(); const c = await api('/api/config'); manualModel('');
   $('p_offline').checked = c.privacy.offline; $('p_sendDocs').checked = c.privacy.sendDocs; $('p_sendCode').checked = c.privacy.sendCode; $('p_redact').checked = c.privacy.redactSecrets; $('p_http').checked = c.privacy.allowHttp; $('p_proxy').value = c.privacy.proxyUrl || ''; $('p_ca').value = c.privacy.caFile || '';
   AIF.forEach((k) => $('c_' + k).value = c.ai[k] ?? ''); $('c_extraHeaders').value = JSON.stringify(c.ai.extraHeaders || {}); $('c_enabled').checked = c.ai.enabled;
   BF.forEach((k) => $('b_' + k).value = c.budget[k]); $('b_cache').checked = c.budget.cache;
-  if (c.ai.enabled && (c.ai.apiKey || c.ai.provider === 'ollama')) loadModels(true);
+  providerUi(); if (c.ai.enabled && (c.ai.apiKey || c.ai.provider === 'ollama')) loadModels(true);
   $('a_maxCommits').value = c.analysis.maxCommits; $('a_wt').checked = c.analysis.includeWorktree; $('a_impOn').checked = c.analysis.impact.enabled; $('a_impDepth').value = c.analysis.impact.maxDepth; $('a_maxReview').value = c.analysis.maxReviewItems; $('a_cveOn').checked = c.analysis.cve.enabled; $('a_osvUrl').value = c.analysis.cve.osvUrl; $('a_cacheHours').value = c.analysis.cve.cacheHours;
 }
 $('save').onclick = async () => {
@@ -310,6 +319,7 @@ $('save').onclick = async () => {
 $('test').onclick = async () => {
   $('cmsg').textContent = 'test in corso…'; $('diag').innerHTML = '';
   try {
+    await saveAi(); // il test usa i valori che vedi nel form
     const r = await post('/api/config/test', {}); $('cmsg').textContent = '';
     $('diag').innerHTML = `<div class="card" style="border-color:${r.ok ? 'var(--ok)' : 'var(--crit)'}"><b>${r.ok ? '✔ Collegamento funzionante' : '✕ Collegamento non riuscito'}</b>${r.steps.map((x, i) => `<div style="margin-top:8px"><span class="ico ${x.ok ? 'pass' : 'fail'}" style="display:inline-grid;vertical-align:middle">${x.ok ? '✔' : '✕'}</span> <b>${i + 1}. ${esc(x.name)}</b><div class="hint" style="margin-left:34px">${esc(x.detail)}</div>${x.hint ? `<div style="margin-left:34px;color:var(--high)">💡 ${esc(x.hint)}</div>` : ''}</div>`).join('')}</div>`;
     if (r.ok) toast('✔ Connessione ok'); quota(); privacy();
