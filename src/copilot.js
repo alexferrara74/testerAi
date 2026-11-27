@@ -12,19 +12,46 @@ import { proxyFor, logEgress } from './privacy.js';
  * CONTESTO CHIUSO: mode "empty" + tools.availableTools=[] + permessi sempre negati + system message sostituito.
  * L'agente NON ha strumenti: non puo' leggere file, eseguire comandi o vagare nel codice; vede solo il prompt.
  * ==================================================================================== */
-let loader = async () => { const req = createRequire(import.meta.url); return import(req.resolve('@microsoft/copilot-sdk')); };
+import os from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { ROOT } from './config.js';
+
+// Cerca l'SDK in piu' posti (progetto, cartella corrente, installazione globale) e lo importa con un URL file://
+// (necessario su Windows: import('C:\\...') fallisce). Distingue "non trovato" da "trovato ma non si carica".
+function searchRoots() {
+  const r = [import.meta.url, pathToFileURL(path.join(process.cwd(), 'noop.js')).href];
+  const g = [process.env.NODE_PATH, path.join(path.dirname(process.execPath), 'node_modules'), path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules'), process.env.APPDATA && path.join(process.env.APPDATA, 'npm', 'node_modules'), path.join(os.homedir(), '.npm-global', 'lib', 'node_modules')]
+    .filter(Boolean).flatMap((x) => String(x).split(path.delimiter));
+  for (const d of g) r.push(pathToFileURL(path.join(d, 'noop.js')).href);
+  return r;
+}
+async function defaultLoader() {
+  let file = '';
+  for (const base of searchRoots()) { try { file = createRequire(base).resolve('@microsoft/copilot-sdk'); break; } catch { /* prossimo percorso */ } }
+  if (!file) throw Object.assign(new Error('SDK non trovato'), { code: 'SDK_NOT_FOUND' });
+  try { return await import(pathToFileURL(file).href); } catch (e) { throw Object.assign(new Error(String(e?.message || e)), { code: 'SDK_LOAD_FAILED', file, cause: e }); }
+}
+let loader = defaultLoader;
 let sdkMod = null;
-export const setSdkLoader = (fn) => { loader = fn; sdkMod = null; client = null; clientKey = ''; }; // solo per test
+export const setSdkLoader = (fn) => { loader = fn || defaultLoader; sdkMod = null; client = null; clientKey = ''; }; // solo per test
+const platformPkgs = () => { try { return fs.readdirSync(path.join(ROOT, 'node_modules', '@microsoft')).filter((n) => n.startsWith('copilot-sdk-')); } catch { return []; } };
 async function sdk() {
   if (sdkMod) return sdkMod;
   try { sdkMod = await loader(); return sdkMod; } catch (e) {
-    const err = new Error('SDK Copilot non installato. Esegui nella cartella del progetto: npm install @microsoft/copilot-sdk (poi riavvia).');
-    err.hint = 'Serve Node ≥ 20.19 o ≥ 22.12. L\'SDK è ufficiale Microsoft/GitHub e viene installato solo se lo richiedi.'; err.cause = e; throw err;
+    if (e.code === 'SDK_NOT_FOUND') {
+      const err = new Error(`SDK Copilot non trovato. Esegui nella cartella del progetto (${ROOT}): npm install @microsoft/copilot-sdk — poi riavvia.`);
+      err.hint = 'Il servizio lo cerca in node_modules del progetto, della cartella da cui lo avvii e nelle installazioni globali di npm. Se l\'hai installato in un\'altra cartella, rilancialo da qui.'; err.code = e.code; throw err;
+    }
+    const nodeOk = (() => { const [M, m] = process.versions.node.split('.').map(Number); return (M === 20 && m >= 19) || (M === 22 && m >= 12) || M > 22; })();
+    const err = new Error(`SDK Copilot installato ma non si carica: ${String(e.message).slice(0, 300)}`);
+    err.hint = [!nodeOk ? `Node ${process.versions.node} non è supportato: serve ≥ 20.19 o ≥ 22.12.` : '', `Pacchetto nativo per ${process.platform}-${process.arch}: ${platformPkgs().length ? platformPkgs().join(', ') : 'NESSUNO installato (npm ha saltato le dipendenze opzionali: reinstalla senza --omit=optional / --no-optional)'}.`, 'Un antivirus può bloccare il runtime nativo.'].filter(Boolean).join(' ');
+    err.code = e.code || 'SDK_LOAD_FAILED'; err.cause = e; throw err;
   }
 }
 export async function sdkStatus() {
-  try { await sdk(); let version = ''; try { let d = path.dirname(createRequire(import.meta.url).resolve('@microsoft/copilot-sdk')); for (let i = 0; i < 6 && !version; i++, d = path.dirname(d)) { const f = path.join(d, 'package.json'); if (fs.existsSync(f)) { const j = JSON.parse(fs.readFileSync(f, 'utf8')); if (j.name === '@microsoft/copilot-sdk') version = j.version; } } } catch { /* sconosciuta */ } return { installed: true, version }; }
-  catch { return { installed: false, version: '' }; }
+  const base = { node: process.versions.node, root: ROOT };
+  try { await sdk(); let version = ''; try { let d = path.dirname(createRequire(import.meta.url).resolve('@microsoft/copilot-sdk')); for (let i = 0; i < 6 && !version; i++, d = path.dirname(d)) { const f = path.join(d, 'package.json'); if (fs.existsSync(f)) { const j = JSON.parse(fs.readFileSync(f, 'utf8')); if (j.name === '@microsoft/copilot-sdk') version = j.version; } } } catch { /* sconosciuta */ } return { ...base, installed: true, version }; }
+  catch (e) { return { ...base, installed: false, version: '', code: e.code || '', error: e.message, hint: e.hint || '' }; }
 }
 
 const ALLOWED = /(^|\.)(githubcopilot\.com|github\.com|githubusercontent\.com)$/i;

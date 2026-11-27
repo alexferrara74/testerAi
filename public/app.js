@@ -274,7 +274,7 @@ async function providerUi() {
   document.querySelectorAll('.nc').forEach((e) => e.classList.toggle('hide', cop));
   $('l_key').textContent = cop ? 'Token GitHub (gho_… / ghu_… / github_pat_…)' : 'API key';
   $('c_sdk').textContent = '';
-  if (cop) { try { const st = await api('/api/copilot/status'); $('c_sdk').innerHTML = st.installed ? `✔ SDK Copilot installato (v${esc(st.version)}). Accesso: solo il token qui sopra.` : '⚠ SDK Copilot non installato: esegui <span class="mono">npm install @microsoft/copilot-sdk</span> nella cartella del progetto e riavvia il servizio.'; } catch {} }
+  if (cop) { try { const st = await api('/api/copilot/status'); $('c_sdk').innerHTML = st.installed ? `✔ SDK Copilot installato (v${esc(st.version)}). Accesso: solo il token qui sopra.` : `<div style="color:var(--high)">⚠ ${esc(st.error)}</div><div>${esc(st.hint || '')}</div><div class="mono">Node ${esc(st.node)} · progetto: ${esc(st.root)}</div>`; } catch {} }
 }
 $('c_provider').onchange = providerUi;
 $('c_preset').onchange = () => { const p = PRESETS[$('c_preset').value]; if (!p) return; for (const [k, v] of Object.entries(p.v)) $('c_' + k).value = v; manualModel('Inserisci le credenziali e premi «Carica modelli»'); providerUi(); $('c_presetHint').textContent = p.h; $('c_enabled').checked = true; };

@@ -214,8 +214,12 @@ test('provider GitHub Copilot via SDK ufficiale: token dal FE, contesto chiuso s
   await stopCopilot(); const aiOff = set({}); saveConfig({ privacy: { offline: true } });
   await assert.rejects(callModel(aiOff, 's', 'u', 5), /offline/i); saveConfig({ privacy: { offline: false } });
   // SDK non installato: messaggio con il comando
-  setSdkLoader(async () => { throw new Error('Cannot find package'); });
+  setSdkLoader(async () => { throw Object.assign(new Error('x'), { code: 'SDK_NOT_FOUND' }); });
   await assert.rejects(callModel(set({}), 's', 'u', 5), /npm install @microsoft\/copilot-sdk/);
+  // installato ma non si carica: l'errore VERO viene mostrato, non "non installato"
+  setSdkLoader(async () => { throw new Error('ERR_DLOPEN_FAILED: koffi.node non valido'); });
+  await assert.rejects(callModel(set({}), 's', 'u', 5), (e) => /installato ma non si carica/.test(e.message) && /koffi/.test(e.message) && /Pacchetto nativo/.test(e.hint));
+  const { sdkStatus } = await import('../src/copilot.js'); const st = await sdkStatus(); assert.ok(!st.installed && /koffi/.test(st.error) && st.node);
   setSdkLoader(async () => { throw new Error('x'); }); await stopCopilot();
 });
 
