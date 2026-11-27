@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createRequire } from 'node:module';
 import { DATA } from './config.js';
 import { proxyFor, logEgress } from './privacy.js';
 
@@ -16,20 +15,46 @@ import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { ROOT } from './config.js';
 
-// Cerca l'SDK in piu' posti (progetto, cartella corrente, installazione globale) e lo importa con un URL file://
-// (necessario su Windows: import('C:\\...') fallisce). Distingue "non trovato" da "trovato ma non si carica".
-function searchRoots() {
-  const r = [import.meta.url, pathToFileURL(path.join(process.cwd(), 'noop.js')).href];
-  const g = [process.env.NODE_PATH, path.join(path.dirname(process.execPath), 'node_modules'), path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules'), process.env.APPDATA && path.join(process.env.APPDATA, 'npm', 'node_modules'), path.join(os.homedir(), '.npm-global', 'lib', 'node_modules')]
-    .filter(Boolean).flatMap((x) => String(x).split(path.delimiter));
-  for (const d of g) r.push(pathToFileURL(path.join(d, 'noop.js')).href);
-  return r;
+// Come viene cercato l'SDK (in ordine): 1) import ESM standard dal progetto; 2) lettura diretta di
+// <cartella>/node_modules/@microsoft/copilot-sdk/package.json risalendo dal progetto e dalla cartella corrente,
+// e nelle installazioni globali di npm; l'entry si legge da package.json (exports.import) e si importa come file://.
+// Ogni tentativo e' registrato e mostrato nel FE.
+const PKG = '@microsoft/copilot-sdk';
+function candidateDirs() {
+  const dirs = []; const add = (d) => { if (d && !dirs.includes(d)) dirs.push(d); };
+  for (const start of [ROOT, process.cwd()]) { let d = path.resolve(start); for (let i = 0; i < 8; i++) { add(path.join(d, 'node_modules')); const up = path.dirname(d); if (up === d) break; d = up; } }
+  for (const g of [process.env.NODE_PATH, path.join(path.dirname(process.execPath), 'node_modules'), path.join(path.dirname(process.execPath), '..', 'lib', 'node_modules'), process.env.APPDATA && path.join(process.env.APPDATA, 'npm', 'node_modules'), path.join(os.homedir(), '.npm-global', 'lib', 'node_modules')].filter(Boolean).flatMap((x) => String(x).split(path.delimiter))) add(g);
+  return dirs;
 }
+export function entryOf(pkgDir) {
+  const pj = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+  const dot = pj.exports && (pj.exports['.'] ?? pj.exports);
+  const pick = (x) => (typeof x === 'string' ? x : x?.default || x?.import?.default || (typeof x?.import === 'string' ? x.import : '') || '');
+  const rel = pick(dot?.import) || pick(dot) || pj.module || pj.main || 'index.js';
+  return { entry: path.resolve(pkgDir, rel), version: pj.version, name: pj.name };
+}
+export async function loadFromDirs(dirs, attempts = []) {
+  for (const nm of dirs) {
+    const pkgDir = path.join(nm, '@microsoft', 'copilot-sdk');
+    if (!fs.existsSync(path.join(pkgDir, 'package.json'))) { attempts.push({ where: pkgDir, found: false }); continue; }
+    let e; try { e = entryOf(pkgDir); } catch (er) { attempts.push({ where: pkgDir, found: true, error: `package.json non leggibile: ${er.message}` }); throw Object.assign(new Error(`package.json non leggibile in ${pkgDir}: ${er.message}`), { code: 'SDK_LOAD_FAILED' }); }
+    attempts.push({ where: pkgDir, found: true, version: e.version, entry: e.entry });
+    try { return await import(pathToFileURL(e.entry).href); } catch (er) { throw Object.assign(new Error(String(er?.message || er)), { code: 'SDK_LOAD_FAILED', cause: er, attempts }); }
+  }
+  return null;
+}
+let lastAttempts = [];
 async function defaultLoader() {
-  let file = '';
-  for (const base of searchRoots()) { try { file = createRequire(base).resolve('@microsoft/copilot-sdk'); break; } catch { /* prossimo percorso */ } }
-  if (!file) throw Object.assign(new Error('SDK non trovato'), { code: 'SDK_NOT_FOUND' });
-  try { return await import(pathToFileURL(file).href); } catch (e) { throw Object.assign(new Error(String(e?.message || e)), { code: 'SDK_LOAD_FAILED', file, cause: e }); }
+  const attempts = []; lastAttempts = attempts;
+  try { const m = await import(PKG); attempts.push({ where: 'import ESM standard dal progetto', found: true }); return m; } // 1) risoluzione standard di Node (condizione "import")
+  catch (e) {
+    const missing = e?.code === 'ERR_MODULE_NOT_FOUND' && new RegExp(`Cannot find package '${PKG.replace('/', '\\/')}'`).test(String(e.message));
+    attempts.push({ where: 'import ESM standard dal progetto', found: false, error: String(e?.message || e).slice(0, 200) });
+    if (!missing) throw Object.assign(new Error(String(e?.message || e)), { code: 'SDK_LOAD_FAILED', cause: e, attempts });
+  }
+  const m = await loadFromDirs(candidateDirs(), attempts); // 2) ricerca diretta
+  if (m) return m;
+  throw Object.assign(new Error('SDK non trovato'), { code: 'SDK_NOT_FOUND', attempts });
 }
 let loader = defaultLoader;
 let sdkMod = null;
@@ -40,18 +65,18 @@ async function sdk() {
   try { sdkMod = await loader(); return sdkMod; } catch (e) {
     if (e.code === 'SDK_NOT_FOUND') {
       const err = new Error(`SDK Copilot non trovato. Esegui nella cartella del progetto (${ROOT}): npm install @microsoft/copilot-sdk — poi riavvia.`);
-      err.hint = 'Il servizio lo cerca in node_modules del progetto, della cartella da cui lo avvii e nelle installazioni globali di npm. Se l\'hai installato in un\'altra cartella, rilancialo da qui.'; err.code = e.code; throw err;
+      err.hint = 'Il servizio lo cerca in node_modules del progetto (e delle cartelle superiori), della cartella da cui lo avvii e nelle installazioni globali di npm. Vedi i tentativi qui sotto.'; err.code = e.code; err.attempts = e.attempts || lastAttempts; throw err;
     }
     const nodeOk = (() => { const [M, m] = process.versions.node.split('.').map(Number); return (M === 20 && m >= 19) || (M === 22 && m >= 12) || M > 22; })();
     const err = new Error(`SDK Copilot installato ma non si carica: ${String(e.message).slice(0, 300)}`);
     err.hint = [!nodeOk ? `Node ${process.versions.node} non è supportato: serve ≥ 20.19 o ≥ 22.12.` : '', `Pacchetto nativo per ${process.platform}-${process.arch}: ${platformPkgs().length ? platformPkgs().join(', ') : 'NESSUNO installato (npm ha saltato le dipendenze opzionali: reinstalla senza --omit=optional / --no-optional)'}.`, 'Un antivirus può bloccare il runtime nativo.'].filter(Boolean).join(' ');
-    err.code = e.code || 'SDK_LOAD_FAILED'; err.cause = e; throw err;
+    err.code = e.code || 'SDK_LOAD_FAILED'; err.cause = e; err.attempts = e.attempts || lastAttempts; throw err;
   }
 }
 export async function sdkStatus() {
   const base = { node: process.versions.node, root: ROOT };
-  try { await sdk(); let version = ''; try { let d = path.dirname(createRequire(import.meta.url).resolve('@microsoft/copilot-sdk')); for (let i = 0; i < 6 && !version; i++, d = path.dirname(d)) { const f = path.join(d, 'package.json'); if (fs.existsSync(f)) { const j = JSON.parse(fs.readFileSync(f, 'utf8')); if (j.name === '@microsoft/copilot-sdk') version = j.version; } } } catch { /* sconosciuta */ } return { ...base, installed: true, version }; }
-  catch (e) { return { ...base, installed: false, version: '', code: e.code || '', error: e.message, hint: e.hint || '' }; }
+  try { await sdk(); const hit = lastAttempts.find((a) => a.version); let version = hit?.version || ''; if (!version) for (const nm of candidateDirs()) { try { const e = entryOf(path.join(nm, '@microsoft', 'copilot-sdk')); version = e.version; break; } catch { /* prossima */ } } return { ...base, installed: true, version }; }
+  catch (e) { return { ...base, installed: false, version: '', code: e.code || '', error: e.message, hint: e.hint || '', attempts: (e.attempts || lastAttempts).slice(0, 14) }; }
 }
 
 const ALLOWED = /(^|\.)(githubcopilot\.com|github\.com|githubusercontent\.com)$/i;

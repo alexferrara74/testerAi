@@ -391,3 +391,25 @@ test('analisi guidata dal documento: UNA chiamata compatta, solo regole pertinen
   assert.ok(seen.length === 1 && !/return true|CHG|BODY/.test(seen[0].usr));
   saveConfig({ privacy: { sendCode: true } }); srv.close();
 });
+
+test('SDK Copilot: trovato anche se espone solo ESM, in cartelle superiori; errori e tentativi leggibili', async () => {
+  const { loadFromDirs, entryOf, sdkStatus, setSdkLoader } = await import('../src/copilot.js');
+  const proj = path.join(tmp, 'sdkproj'); const nm = path.join(proj, 'node_modules'); const pkg = path.join(nm, '@microsoft', 'copilot-sdk');
+  fs.mkdirSync(path.join(pkg, 'dist'), { recursive: true });
+  // pacchetto SOLO ESM (nessuna condizione "require"): require.resolve falliva, la lettura diretta no
+  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: '@microsoft/copilot-sdk', version: '9.9.9', type: 'module', exports: { '.': { import: { types: './dist/index.d.ts', default: './dist/index.js' } } } }));
+  fs.writeFileSync(path.join(pkg, 'dist', 'index.js'), 'export const CopilotClient = class {}; export const marker = "esm-ok";');
+  assert.equal(entryOf(pkg).entry, path.join(pkg, 'dist', 'index.js'));
+  const attempts = [];
+  const mod = await loadFromDirs([path.join(tmp, 'nonexistent', 'node_modules'), nm], attempts);
+  assert.equal(mod.marker, 'esm-ok'); assert.deepEqual(attempts.map((a) => a.found), [false, true]); assert.equal(attempts[1].version, '9.9.9');
+  // entry che esplode al caricamento -> SDK_LOAD_FAILED con messaggio vero (non "non installato")
+  fs.writeFileSync(path.join(pkg, 'dist', 'boom.js'), 'throw new Error("koffi: impossibile caricare il modulo nativo");');
+  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: '@microsoft/copilot-sdk', version: '9.9.9', type: 'module', exports: { '.': { import: { default: './dist/boom.js' } } } }));
+  await assert.rejects(loadFromDirs([nm], []), (e) => e.code === 'SDK_LOAD_FAILED' && /koffi/.test(e.message));
+  assert.equal(await loadFromDirs([path.join(tmp, 'vuota')], []), null);
+  // l'SDK reale installato nel progetto viene trovato dal loader di default
+  setSdkLoader(null); const st = await sdkStatus();
+  assert.ok(st.installed ? /^\d+\.\d+/.test(st.version) : Array.isArray(st.attempts), JSON.stringify(st).slice(0, 300));
+  setSdkLoader(async () => { throw new Error('x'); });
+});

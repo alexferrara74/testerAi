@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test --test-force-exit test/*.test.js"
+    "test": "node --test --test-force-exit test/*.test.js",
+    "doctor": "node src/doctor.js"
   },
   "optionalDependencies": {
     "@microsoft/copilot-sdk": "^2.0.3"
